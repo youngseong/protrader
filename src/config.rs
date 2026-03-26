@@ -69,7 +69,9 @@ mod tests {
 
     #[test]
     fn test_load_config() {
-        let config = Config::load("config.toml").expect("should load config.toml");
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let config = Config::load(manifest.join("config.toml").to_str().unwrap())
+            .expect("should load config.toml");
         assert_eq!(config.trading.mode, TradingMode::Paper);
         assert_eq!(config.trading.fixed_amount_krw, 500_000);
         assert!((config.trading.breakout_buffer_pct - 0.2).abs() < f64::EPSILON);
@@ -83,9 +85,11 @@ mod tests {
 
     #[test]
     fn test_credentials_from_env() {
-        std::env::set_var("KIS_APP_KEY", "test_key");
-        std::env::set_var("KIS_APP_SECRET", "test_secret");
-        std::env::set_var("KIS_ACCOUNT_NO", "12345678");
+        unsafe {
+            std::env::set_var("KIS_APP_KEY", "test_key");
+            std::env::set_var("KIS_APP_SECRET", "test_secret");
+            std::env::set_var("KIS_ACCOUNT_NO", "12345678");
+        }
         let creds = Credentials::from_env();
         assert_eq!(creds.app_key, "test_key");
         assert_eq!(creds.app_secret, "test_secret");
