@@ -14,7 +14,6 @@ pub fn init() -> tracing_appender::non_blocking::WorkerGuard {
             fmt::layer()
                 .with_target(false)
                 .with_level(false)
-                .without_time()
                 .with_ansi(false)
                 .with_writer(non_blocking_file),
         )
@@ -22,7 +21,6 @@ pub fn init() -> tracing_appender::non_blocking::WorkerGuard {
             fmt::layer()
                 .with_target(false)
                 .with_level(false)
-                .without_time()
                 .with_writer(std::io::stdout),
         )
         .init();
