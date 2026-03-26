@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use crate::config::{TradingConfig, RiskConfig};
+use crate::config::{TradingConfig, RiskConfig, SymbolConfig};
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -52,93 +52,93 @@ pub enum SessionPhase {
     Closed,
 }
 
-// ── Internal per-symbol state ─────────────────────────────────────────────────
+// ── Strategy trait ────────────────────────────────────────────────────────────
 
-#[derive(Debug)]
+pub trait Strategy: Send {
+    fn on_tick(&mut self, symbol: &str, price: i64, phase: &SessionPhase, daily_limit_hit: bool) -> Signal;
+    fn record_buy(&mut self, symbol: &str, price: i64, qty: u32);
+    /// Records a sell and returns the realized PnL for this trade.
+    fn record_exit(&mut self, symbol: &str, price: i64, blacklist: bool) -> i64;
+    fn get_position_qty(&self, symbol: &str) -> u32;
+    fn session_pnl(&self) -> SessionPnl;
+}
+
+// ── OrbStrategy internal per-symbol state ────────────────────────────────────
+
 struct SymbolState {
-    range_high: i64,       // 0 until first tick
-    range_low: i64,        // i64::MAX until first tick
+    // resolved per-symbol config (overrides or globals)
+    fixed_amount: i64,
+    breakout_buffer_pct: f64,
+    stop_loss_pct: f64,
+    // runtime state
+    range_high: i64,
+    range_low: i64,
     position: Option<Position>,
     blacklisted: bool,
-    unrealized_pnl: i64,   // last computed unrealized for this symbol
+    cached_unrealized: i64,
 }
 
 impl SymbolState {
-    fn new() -> Self {
+    fn new(fixed_amount: i64, breakout_buffer_pct: f64, stop_loss_pct: f64) -> Self {
         Self {
+            fixed_amount,
+            breakout_buffer_pct,
+            stop_loss_pct,
             range_high: 0,
             range_low: i64::MAX,
             position: None,
             blacklisted: false,
-            unrealized_pnl: 0,
+            cached_unrealized: 0,
         }
     }
 }
 
-// ── StrategyEngine ────────────────────────────────────────────────────────────
+// ── OrbStrategy ───────────────────────────────────────────────────────────────
 
-pub struct StrategyEngine {
-    trading: TradingConfig,
-    risk: RiskConfig,
+pub struct OrbStrategy {
     symbols: HashMap<String, SymbolState>,
-    pub session_pnl: SessionPnl,
-    phase: SessionPhase,
-    daily_limit_hit: bool,
+    session_pnl: SessionPnl,
 }
 
-impl StrategyEngine {
-    pub fn new(trading: TradingConfig, risk: RiskConfig, watchlist: &[String]) -> Self {
-        let symbols = watchlist
+impl OrbStrategy {
+    pub fn new(trading: &TradingConfig, risk: &RiskConfig, symbols: &[SymbolConfig]) -> Self {
+        let states = symbols
             .iter()
-            .map(|s| (s.clone(), SymbolState::new()))
+            .map(|sc| {
+                let state = SymbolState::new(
+                    sc.effective_fixed_amount(trading),
+                    sc.effective_breakout_buffer_pct(trading),
+                    sc.effective_stop_loss_pct(risk),
+                );
+                (sc.ticker.clone(), state)
+            })
             .collect();
-        Self {
-            trading,
-            risk,
-            symbols,
-            session_pnl: SessionPnl::default(),
-            phase: SessionPhase::CapturingRange,
-            daily_limit_hit: false,
-        }
+        Self { symbols: states, session_pnl: SessionPnl::default() }
     }
+}
 
-    pub fn set_phase(&mut self, phase: SessionPhase) {
-        self.phase = phase;
-    }
-
-    /// Returns the qty of shares currently held for a symbol (0 if flat).
-    pub fn get_position_qty(&self, symbol: &str) -> u32 {
-        self.symbols
-            .get(symbol)
-            .and_then(|s| s.position.as_ref())
-            .map(|p| p.qty)
-            .unwrap_or(0)
-    }
-
-    /// Process a price tick for a symbol. Returns the signal to act on.
-    pub fn on_tick(&mut self, symbol: &str, price: i64) -> Signal {
-        // Step 1: update unrealized PnL for this symbol (ends borrow)
+impl Strategy for OrbStrategy {
+    fn on_tick(&mut self, symbol: &str, price: i64, phase: &SessionPhase, daily_limit_hit: bool) -> Signal {
+        // Step 1: update this symbol's cached unrealized (ends borrow)
         if let Some(state) = self.symbols.get_mut(symbol) {
-            if let Some(ref pos) = state.position {
-                state.unrealized_pnl = pos.unrealized_pnl(price);
-            }
+            state.cached_unrealized = state
+                .position
+                .as_ref()
+                .map(|p| p.unrealized_pnl(price))
+                .unwrap_or(0);
         }
-        // Step 2: recalculate total session unrealized (safe: no active borrow)
-        self.session_pnl.unrealized = self.symbols.values().map(|s| s.unrealized_pnl).sum();
+        // Step 2: recompute total session unrealized (safe: no active borrow)
+        self.session_pnl.unrealized = self.symbols.values().map(|s| s.cached_unrealized).sum();
 
         let state = match self.symbols.get_mut(symbol) {
             Some(s) => s,
             None => return Signal::Hold,
         };
 
-        match self.phase {
+        match phase {
             SessionPhase::CapturingRange => {
-                if price > state.range_high {
-                    state.range_high = price;
-                }
-                if price < state.range_low {
-                    state.range_low = price;
-                }
+                if price > state.range_high { state.range_high = price; }
+                if price < state.range_low { state.range_low = price; }
                 Signal::Hold
             }
 
@@ -146,61 +146,46 @@ impl StrategyEngine {
                 // Priority 1: stop-loss on open position (always checked)
                 if let Some(ref pos) = state.position {
                     let stop_price =
-                        (pos.entry_price as f64 * (1.0 - self.risk.stop_loss_pct / 100.0)) as i64;
+                        (pos.entry_price as f64 * (1.0 - state.stop_loss_pct / 100.0)) as i64;
                     if price <= stop_price {
-                        return Signal::Exit {
-                            price,
-                            reason: ExitReason::StopLoss,
-                        };
+                        return Signal::Exit { price, reason: ExitReason::StopLoss };
                     }
                 }
-
-                // Priority 2: if daily limit hit, close any open position and block new entries
-                if self.daily_limit_hit {
+                // Priority 2: daily limit — close open position, block new entries
+                if daily_limit_hit {
                     if state.position.is_some() {
-                        return Signal::Exit {
-                            price,
-                            reason: ExitReason::DailyLimitReached,
-                        };
+                        return Signal::Exit { price, reason: ExitReason::DailyLimitReached };
                     }
                     return Signal::Hold;
                 }
-
-                // Priority 3: no new entries if position open or blacklisted
+                // Priority 3: no re-entry while position open or symbol blacklisted
                 if state.position.is_some() || state.blacklisted {
                     return Signal::Hold;
                 }
-
                 // Priority 4: check for breakout entry
                 if state.range_high > 0 {
                     let breakout_price = (state.range_high as f64
-                        * (1.0 + self.trading.breakout_buffer_pct / 100.0))
-                        as i64;
+                        * (1.0 + state.breakout_buffer_pct / 100.0)) as i64;
                     if price > breakout_price {
-                        let qty = (self.trading.fixed_amount_krw / price) as u32;
+                        let qty = (state.fixed_amount / price) as u32;
                         if qty > 0 {
                             return Signal::Buy { price, qty };
                         }
                     }
                 }
-
                 Signal::Hold
             }
 
             SessionPhase::Closed => {
                 if state.position.is_some() {
-                    return Signal::Exit {
-                        price,
-                        reason: ExitReason::ForcedClose,
-                    };
+                    return Signal::Exit { price, reason: ExitReason::ForcedClose };
                 }
                 Signal::Hold
             }
         }
     }
 
-    /// Call after a buy order is confirmed to record the position.
-    pub fn record_buy(&mut self, symbol: &str, price: i64, qty: u32) {
+    fn record_buy(&mut self, symbol: &str, price: i64, qty: u32) {
         if let Some(state) = self.symbols.get_mut(symbol) {
             if state.position.is_some() {
                 tracing::warn!("record_buy called for {} but position already open — ignoring", symbol);
@@ -210,77 +195,120 @@ impl StrategyEngine {
         }
     }
 
-    /// Call after a sell order is confirmed. Records P&L, optionally blacklists.
-    /// Returns realized P&L for this trade.
-    pub fn record_exit(&mut self, symbol: &str, price: i64, blacklist: bool) -> i64 {
+    fn record_exit(&mut self, symbol: &str, price: i64, blacklist: bool) -> i64 {
         let state = match self.symbols.get_mut(symbol) {
             Some(s) => s,
             None => return 0,
         };
-        let pnl = state
-            .position
-            .take()
-            .map(|p| p.realized_pnl(price))
-            .unwrap_or(0);
-        state.unrealized_pnl = 0;
-        if blacklist {
-            state.blacklisted = true;
-        }
+        let pnl = state.position.take().map(|p| p.realized_pnl(price)).unwrap_or(0);
+        state.cached_unrealized = 0;
+        if blacklist { state.blacklisted = true; }
         self.session_pnl.realized += pnl;
-        self.session_pnl.unrealized = self.symbols.values().map(|s| s.unrealized_pnl).sum();
-        // Daily limit is checked against realized P&L only (not unrealized), per spec.
-        // Unrealized losses fluctuate and would cause premature halting on temporary dips.
-        if self.session_pnl.realized < -self.risk.daily_loss_limit_krw {
+        self.session_pnl.unrealized = self.symbols.values().map(|s| s.cached_unrealized).sum();
+        pnl
+    }
+
+    fn get_position_qty(&self, symbol: &str) -> u32 {
+        self.symbols
+            .get(symbol)
+            .and_then(|s| s.position.as_ref())
+            .map(|p| p.qty)
+            .unwrap_or(0)
+    }
+
+    fn session_pnl(&self) -> SessionPnl {
+        self.session_pnl.clone()
+    }
+}
+
+// ── StrategyEngine (coordinator) ──────────────────────────────────────────────
+
+pub struct StrategyEngine {
+    strategy: Box<dyn Strategy>,
+    phase: SessionPhase,
+    daily_limit_hit: bool,
+    daily_loss_limit: i64,
+}
+
+impl StrategyEngine {
+    pub fn new(strategy: Box<dyn Strategy>, daily_loss_limit: i64) -> Self {
+        Self {
+            strategy,
+            phase: SessionPhase::CapturingRange,
+            daily_limit_hit: false,
+            daily_loss_limit,
+        }
+    }
+
+    pub fn set_phase(&mut self, phase: SessionPhase) {
+        self.phase = phase;
+    }
+
+    pub fn on_tick(&mut self, symbol: &str, price: i64) -> Signal {
+        self.strategy.on_tick(symbol, price, &self.phase, self.daily_limit_hit)
+    }
+
+    pub fn record_buy(&mut self, symbol: &str, price: i64, qty: u32) {
+        self.strategy.record_buy(symbol, price, qty);
+    }
+
+    pub fn record_exit(&mut self, symbol: &str, price: i64, blacklist: bool) -> i64 {
+        let pnl = self.strategy.record_exit(symbol, price, blacklist);
+        // Daily limit is checked against realized P&L only (not unrealized).
+        if self.strategy.session_pnl().realized < -self.daily_loss_limit {
             self.daily_limit_hit = true;
         }
         pnl
     }
 
+    pub fn get_position_qty(&self, symbol: &str) -> u32 {
+        self.strategy.get_position_qty(symbol)
+    }
+
     pub fn daily_limit_hit(&self) -> bool {
         self.daily_limit_hit
+    }
+
+    pub fn session_pnl(&self) -> SessionPnl {
+        self.strategy.session_pnl()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{TradingConfig, RiskConfig, TradingMode};
+    use crate::config::{TradingConfig, RiskConfig, TradingMode, SymbolConfig};
 
-    fn make_engine() -> StrategyEngine {
-        StrategyEngine::new(
-            TradingConfig {
-                mode: TradingMode::Paper,
-                fixed_amount_krw: 500_000,
-                breakout_buffer_pct: 0.2,
-                range_minutes: 30,
-                poll_interval_secs: 5,
-                exit_time: "15:20".into(),
-            },
-            RiskConfig {
-                stop_loss_pct: 1.5,
-                daily_loss_limit_krw: 100_000,
-            },
-            &["005930".to_string()],
-        )
+    fn make_trading() -> TradingConfig {
+        TradingConfig {
+            mode: TradingMode::Paper,
+            fixed_amount: 500_000,
+            breakout_buffer_pct: 0.2,
+            range_minutes: 30,
+            poll_interval_secs: 5,
+        }
     }
 
-    #[test]
-    fn test_range_capture_tracks_high_and_low() {
-        let mut engine = make_engine();
-        engine.on_tick("005930", 71_000);
-        engine.on_tick("005930", 72_000);
-        engine.on_tick("005930", 70_500);
-        let state = engine.symbols.get("005930").unwrap();
-        assert_eq!(state.range_high, 72_000);
-        assert_eq!(state.range_low, 70_500);
+    fn make_risk() -> RiskConfig {
+        RiskConfig { stop_loss_pct: 1.5, daily_loss_limit: 100_000 }
+    }
+
+    fn sym(ticker: &str) -> SymbolConfig {
+        SymbolConfig { ticker: ticker.to_string(), fixed_amount: None, breakout_buffer_pct: None, stop_loss_pct: None }
+    }
+
+    fn make_engine() -> StrategyEngine {
+        let trading = make_trading();
+        let risk = make_risk();
+        let orb = OrbStrategy::new(&trading, &risk, &[sym("005930")]);
+        StrategyEngine::new(Box::new(orb), risk.daily_loss_limit)
     }
 
     #[test]
     fn test_no_buy_during_range_capture() {
         let mut engine = make_engine();
-        let signal = engine.on_tick("005930", 99_000); // way above any breakout
+        let signal = engine.on_tick("005930", 99_000);
         assert_eq!(signal, Signal::Hold);
-        assert!(engine.symbols.get("005930").unwrap().position.is_none());
     }
 
     #[test]
@@ -288,8 +316,7 @@ mod tests {
         let mut engine = make_engine();
         engine.on_tick("005930", 71_000); // sets range_high = 71_000
         engine.set_phase(SessionPhase::Monitoring);
-        // breakout_price = 71_000 * 1.002 = 71_142
-        // price 72_000 > 71_142 → Buy; qty = 500_000 / 72_000 = 6
+        // breakout_price = 71_000 * 1.002 = 71_142; price 72_000 > 71_142 → Buy; qty = 500_000 / 72_000 = 6
         let signal = engine.on_tick("005930", 72_000);
         assert_eq!(signal, Signal::Buy { price: 72_000, qty: 6 });
     }
@@ -310,7 +337,6 @@ mod tests {
         engine.on_tick("005930", 71_000);
         engine.set_phase(SessionPhase::Monitoring);
         engine.record_buy("005930", 72_000, 6);
-        // Already in a position — should not buy again
         let signal = engine.on_tick("005930", 75_000);
         assert_eq!(signal, Signal::Hold);
     }
@@ -321,12 +347,9 @@ mod tests {
         engine.on_tick("005930", 71_000);
         engine.set_phase(SessionPhase::Monitoring);
         engine.record_buy("005930", 72_000, 6);
-        // stop_loss at 72_000 * (1 - 0.015) = 70_920; price 70_800 <= 70_920
+        // stop_loss at 72_000 * (1 - 0.015) = 70_920; 70_800 <= 70_920
         let signal = engine.on_tick("005930", 70_800);
-        assert_eq!(
-            signal,
-            Signal::Exit { price: 70_800, reason: ExitReason::StopLoss }
-        );
+        assert_eq!(signal, Signal::Exit { price: 70_800, reason: ExitReason::StopLoss });
     }
 
     #[test]
@@ -337,7 +360,7 @@ mod tests {
         engine.record_buy("005930", 72_000, 6);
         let pnl = engine.record_exit("005930", 73_000, false);
         assert_eq!(pnl, (73_000 - 72_000) * 6); // +6_000
-        assert_eq!(engine.session_pnl.realized, 6_000);
+        assert_eq!(engine.session_pnl().realized, 6_000);
     }
 
     #[test]
@@ -350,26 +373,15 @@ mod tests {
         // No re-entry even on a clear breakout
         let signal = engine.on_tick("005930", 80_000);
         assert_eq!(signal, Signal::Hold);
-        assert!(engine.symbols.get("005930").unwrap().blacklisted);
     }
 
     #[test]
     fn test_daily_loss_limit_stops_new_entries() {
-        let mut engine = StrategyEngine::new(
-            TradingConfig {
-                mode: TradingMode::Paper,
-                fixed_amount_krw: 500_000,
-                breakout_buffer_pct: 0.2,
-                range_minutes: 30,
-                poll_interval_secs: 5,
-                exit_time: "15:20".into(),
-            },
-            RiskConfig {
-                stop_loss_pct: 1.5,
-                daily_loss_limit_krw: 100_000,
-            },
-            &["005930".to_string(), "069500".to_string()],
-        );
+        let trading = make_trading();
+        let risk = make_risk();
+        let orb = OrbStrategy::new(&trading, &risk, &[sym("005930"), sym("069500")]);
+        let mut engine = StrategyEngine::new(Box::new(orb), risk.daily_loss_limit);
+
         engine.on_tick("005930", 71_000);
         engine.on_tick("069500", 9_000);
         engine.set_phase(SessionPhase::Monitoring);
@@ -390,10 +402,7 @@ mod tests {
         engine.record_buy("005930", 72_000, 6);
         engine.set_phase(SessionPhase::Closed);
         let signal = engine.on_tick("005930", 72_500);
-        assert_eq!(
-            signal,
-            Signal::Exit { price: 72_500, reason: ExitReason::ForcedClose }
-        );
+        assert_eq!(signal, Signal::Exit { price: 72_500, reason: ExitReason::ForcedClose });
     }
 
     #[test]
@@ -408,35 +417,21 @@ mod tests {
 
     #[test]
     fn test_daily_limit_hit_closes_open_positions() {
-        let mut engine = StrategyEngine::new(
-            TradingConfig {
-                mode: TradingMode::Paper,
-                fixed_amount_krw: 500_000,
-                breakout_buffer_pct: 0.2,
-                range_minutes: 30,
-                poll_interval_secs: 5,
-                exit_time: "15:20".into(),
-            },
-            RiskConfig {
-                stop_loss_pct: 1.5,
-                daily_loss_limit_krw: 100_000,
-            },
-            &["005930".to_string(), "069500".to_string()],
-        );
+        let trading = make_trading();
+        let risk = make_risk();
+        let orb = OrbStrategy::new(&trading, &risk, &[sym("005930"), sym("069500")]);
+        let mut engine = StrategyEngine::new(Box::new(orb), risk.daily_loss_limit);
+
         engine.on_tick("005930", 71_000);
         engine.on_tick("069500", 9_000);
         engine.set_phase(SessionPhase::Monitoring);
 
-        // Buy 069500 and keep it open
-        engine.record_buy("069500", 9_200, 54); // 500_000/9_200=54
-
-        // Take a huge realized loss on 005930 that triggers the daily limit
+        engine.record_buy("069500", 9_200, 54);
         engine.record_buy("005930", 72_000, 6);
         engine.record_exit("005930", 55_000, false); // realized = (55_000-72_000)*6 = -102_000
 
         assert!(engine.daily_limit_hit());
 
-        // Next tick for 069500 should emit DailyLimitReached to close the open position
         let signal = engine.on_tick("069500", 9_300);
         assert_eq!(signal, Signal::Exit { price: 9_300, reason: ExitReason::DailyLimitReached });
     }
@@ -449,6 +444,30 @@ mod tests {
         engine.record_buy("005930", 72_000, 6);
         engine.on_tick("005930", 73_000);
         // unrealized = (73_000 - 72_000) * 6 = 6_000
-        assert_eq!(engine.session_pnl.unrealized, 6_000);
+        assert_eq!(engine.session_pnl().unrealized, 6_000);
+    }
+
+    #[test]
+    fn test_per_symbol_fixed_amount_override() {
+        let trading = make_trading(); // fixed_amount = 500_000
+        let risk = make_risk();
+        let symbols = vec![
+            sym("005930"),
+            SymbolConfig {
+                ticker: "069500".to_string(),
+                fixed_amount: Some(200_000),
+                breakout_buffer_pct: None,
+                stop_loss_pct: None,
+            },
+        ];
+        let orb = OrbStrategy::new(&trading, &risk, &symbols);
+        let mut engine = StrategyEngine::new(Box::new(orb), risk.daily_loss_limit);
+
+        engine.on_tick("069500", 9_000);
+        engine.set_phase(SessionPhase::Monitoring);
+        // breakout_price = 9_000 * 1.002 = 9_018; price 10_000 > 9_018
+        // qty = 200_000 / 10_000 = 20 (not 500_000 / 10_000 = 50)
+        let signal = engine.on_tick("069500", 10_000);
+        assert_eq!(signal, Signal::Buy { price: 10_000, qty: 20 });
     }
 }

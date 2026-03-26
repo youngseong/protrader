@@ -1,14 +1,21 @@
 [trading]
 mode = "paper"
-fixed_amount_krw = 500000
+fixed_amount = 500000
 breakout_buffer_pct = 0.2
 range_minutes = 30
 poll_interval_secs = 5
-exit_time = "15:20"
 
 [risk]
 stop_loss_pct = 5
-daily_loss_limit_krw = 100000
+daily_loss_limit = 100000
 
-[symbols]
-watchlist = ["005930", "069500"]
+[market]
+timezone = "Asia/Seoul"
+open_time = "09:00"
+exit_time = "15:20"
+
+[[symbols]]
+ticker = "005930"
+
+[[symbols]]
+ticker = "069500"
