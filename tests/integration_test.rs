@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 use protrader::config::{Config, TradingConfig, RiskConfig, SymbolsConfig, TradingMode};
 use protrader::strategy::{StrategyEngine, SessionPhase, Signal, ExitReason};
 use protrader::market_data::{MockMarketDataClient, MarketDataClient};
-use protrader::order::PaperOrderClient;
+
 
 fn paper_config(watchlist: Vec<String>) -> Config {
     Config {
