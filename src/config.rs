@@ -39,7 +39,30 @@ impl Config {
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let config: Config = toml::from_str(&content)?;
+        config.validate()?;
         Ok(config)
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        // Validate exit_time format
+        let parts: Vec<&str> = self.trading.exit_time.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            anyhow::bail!("invalid exit_time '{}': must be HH:MM format", self.trading.exit_time);
+        }
+        let h: u32 = parts[0].parse().map_err(|_| anyhow::anyhow!("invalid exit_time hour '{}'", parts[0]))?;
+        let m: u32 = parts[1].parse().map_err(|_| anyhow::anyhow!("invalid exit_time minute '{}'", parts[1]))?;
+        if h > 23 || m > 59 {
+            anyhow::bail!("invalid exit_time '{}': hour must be 0-23, minute 0-59", self.trading.exit_time);
+        }
+        // Validate watchlist is non-empty
+        if self.symbols.watchlist.is_empty() {
+            anyhow::bail!("watchlist must not be empty");
+        }
+        // Validate positive amounts
+        if self.trading.fixed_amount_krw <= 0 {
+            anyhow::bail!("fixed_amount_krw must be positive");
+        }
+        Ok(())
     }
 }
 

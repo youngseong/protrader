@@ -136,8 +136,11 @@ async fn symbol_loop(
                     symbol, retry_count, e
                 );
                 if retry_count >= 3 {
-                    tracing::warn!("symbol={} skipping tick after 3 failures", symbol);
+                    tracing::warn!("symbol={} skipping tick after 3 failures, backing off", symbol);
+                    sleep(Duration::from_secs(2u64.pow(retry_count.min(6)))).await;
                     retry_count = 0;
+                } else {
+                    sleep(Duration::from_secs(2u64.pow(retry_count))).await;
                 }
                 continue;
             }
@@ -170,29 +173,42 @@ async fn symbol_loop(
             Signal::Exit { price, reason } => {
                 let blacklist = matches!(reason, ExitReason::StopLoss);
                 let qty = engine.lock().await.get_position_qty(&symbol);
-                let pnl = engine.lock().await.record_exit(&symbol, price, blacklist);
-                let reason_str = match reason {
-                    ExitReason::StopLoss => "STOP-LOSS",
-                    ExitReason::DailyLimitReached => "DAILY-LIMIT",
-                    ExitReason::ForcedClose => "FORCED-CLOSE",
-                };
-                let blacklist_suffix = if blacklist { " | blacklisted" } else { "" };
-                tracing::info!(
-                    "{} KST | [{}] | {} {} | price={} | realized_pnl={}{}",
-                    now_kst(), mode_str, reason_str, symbol, price, pnl, blacklist_suffix
-                );
-                let req = OrderRequest { symbol: symbol.clone(), side: OrderSide::Sell, qty, price };
-                if let Err(e) = order_client.place_order(&req).await {
-                    tracing::error!(
-                        "{} KST | [{}] | ORDER FAILED {} | error={}",
-                        now_kst(), mode_str, symbol, e
+
+                if qty == 0 {
+                    tracing::warn!(
+                        "{} KST | [{}] | EXIT {} ignored — no open position",
+                        now_kst(), mode_str, symbol
                     );
+                } else {
+                    let req = OrderRequest { symbol: symbol.clone(), side: OrderSide::Sell, qty, price };
+                    match order_client.place_order(&req).await {
+                        Ok(_) => {
+                            let pnl = engine.lock().await.record_exit(&symbol, price, blacklist);
+                            let reason_str = match &reason {
+                                ExitReason::StopLoss => "STOP-LOSS",
+                                ExitReason::DailyLimitReached => "DAILY-LIMIT",
+                                ExitReason::ForcedClose => "FORCED-CLOSE",
+                            };
+                            let blacklist_suffix = if blacklist { " | blacklisted" } else { "" };
+                            tracing::info!(
+                                "{} KST | [{}] | {} {} | price={} | realized_pnl={}{}",
+                                now_kst(), mode_str, reason_str, symbol, price, pnl, blacklist_suffix
+                            );
+                            let session = engine.lock().await.session_pnl.clone();
+                            tracing::info!(
+                                "{} KST | [{}] | SESSION PnL | realized={} | unrealized={} | total={}",
+                                now_kst(), mode_str, session.realized, session.unrealized, session.total()
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "{} KST | [{}] | ORDER FAILED {} | error={}",
+                                now_kst(), mode_str, symbol, e
+                            );
+                            // Position remains open — do NOT call record_exit
+                        }
+                    }
                 }
-                let session = engine.lock().await.session_pnl.clone();
-                tracing::info!(
-                    "{} KST | [{}] | SESSION PnL | realized={} | unrealized={} | total={}",
-                    now_kst(), mode_str, session.realized, session.unrealized, session.total()
-                );
             }
 
             Signal::Hold => {}
