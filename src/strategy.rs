@@ -155,12 +155,23 @@ impl StrategyEngine {
                     }
                 }
 
-                // Priority 2: no new entries if daily limit hit, position open, or blacklisted
-                if self.daily_limit_hit || state.position.is_some() || state.blacklisted {
+                // Priority 2: if daily limit hit, close any open position and block new entries
+                if self.daily_limit_hit {
+                    if state.position.is_some() {
+                        return Signal::Exit {
+                            price,
+                            reason: ExitReason::DailyLimitReached,
+                        };
+                    }
                     return Signal::Hold;
                 }
 
-                // Priority 3: check for breakout entry
+                // Priority 3: no new entries if position open or blacklisted
+                if state.position.is_some() || state.blacklisted {
+                    return Signal::Hold;
+                }
+
+                // Priority 4: check for breakout entry
                 if state.range_high > 0 {
                     let breakout_price = (state.range_high as f64
                         * (1.0 + self.trading.breakout_buffer_pct / 100.0))
@@ -191,6 +202,10 @@ impl StrategyEngine {
     /// Call after a buy order is confirmed to record the position.
     pub fn record_buy(&mut self, symbol: &str, price: i64, qty: u32) {
         if let Some(state) = self.symbols.get_mut(symbol) {
+            if state.position.is_some() {
+                tracing::warn!("record_buy called for {} but position already open — ignoring", symbol);
+                return;
+            }
             state.position = Some(Position { entry_price: price, qty });
         }
     }
@@ -213,6 +228,8 @@ impl StrategyEngine {
         }
         self.session_pnl.realized += pnl;
         self.session_pnl.unrealized = self.symbols.values().map(|s| s.unrealized_pnl).sum();
+        // Daily limit is checked against realized P&L only (not unrealized), per spec.
+        // Unrealized losses fluctuate and would cause premature halting on temporary dips.
         if self.session_pnl.realized < -self.risk.daily_loss_limit_krw {
             self.daily_limit_hit = true;
         }
@@ -387,6 +404,41 @@ mod tests {
         assert_eq!(engine.get_position_qty("005930"), 6);
         engine.record_exit("005930", 73_000, false);
         assert_eq!(engine.get_position_qty("005930"), 0);
+    }
+
+    #[test]
+    fn test_daily_limit_hit_closes_open_positions() {
+        let mut engine = StrategyEngine::new(
+            TradingConfig {
+                mode: TradingMode::Paper,
+                fixed_amount_krw: 500_000,
+                breakout_buffer_pct: 0.2,
+                range_minutes: 30,
+                poll_interval_secs: 5,
+                exit_time: "15:20".into(),
+            },
+            RiskConfig {
+                stop_loss_pct: 1.5,
+                daily_loss_limit_krw: 100_000,
+            },
+            &["005930".to_string(), "069500".to_string()],
+        );
+        engine.on_tick("005930", 71_000);
+        engine.on_tick("069500", 9_000);
+        engine.set_phase(SessionPhase::Monitoring);
+
+        // Buy 069500 and keep it open
+        engine.record_buy("069500", 9_200, 54); // 500_000/9_200=54
+
+        // Take a huge realized loss on 005930 that triggers the daily limit
+        engine.record_buy("005930", 72_000, 6);
+        engine.record_exit("005930", 55_000, false); // realized = (55_000-72_000)*6 = -102_000
+
+        assert!(engine.daily_limit_hit());
+
+        // Next tick for 069500 should emit DailyLimitReached to close the open position
+        let signal = engine.on_tick("069500", 9_300);
+        assert_eq!(signal, Signal::Exit { price: 9_300, reason: ExitReason::DailyLimitReached });
     }
 
     #[test]
