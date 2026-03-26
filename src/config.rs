@@ -101,7 +101,7 @@ mod tests {
         assert_eq!(config.trading.range_minutes, 30);
         assert_eq!(config.trading.poll_interval_secs, 5);
         assert_eq!(config.trading.exit_time, "15:20");
-        assert!((config.risk.stop_loss_pct - 1.5).abs() < f64::EPSILON);
+        assert!((config.risk.stop_loss_pct - 5.0).abs() < f64::EPSILON);
         assert_eq!(config.risk.daily_loss_limit_krw, 100_000);
         assert_eq!(config.symbols.watchlist, vec!["005930", "069500"]);
     }

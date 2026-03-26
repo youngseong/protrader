@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
-use chrono::Timelike;
+use chrono::{Timelike, TimeZone};
 use chrono_tz::Asia::Seoul;
 
 use crate::config::{Config, TradingMode};
@@ -32,6 +32,28 @@ impl SessionScheduler {
             TradingMode::Paper => "PAPER",
             TradingMode::Live => "LIVE",
         };
+
+        // ── If market is already closed today, wait until tomorrow 09:00 ───
+        let (exit_h, exit_m) = parse_time(&self.config.trading.exit_time);
+        {
+            let now = chrono::Utc::now().with_timezone(&Seoul);
+            let now_min = now.hour() * 60 + now.minute();
+            if now_min >= exit_h * 60 + exit_m {
+                let tomorrow = now.date_naive().succ_opt().expect("date overflow");
+                let open_tomorrow = Seoul
+                    .from_local_datetime(&tomorrow.and_hms_opt(9, 0, 0).unwrap())
+                    .unwrap();
+                let wait_secs = (open_tomorrow - chrono::Utc::now().with_timezone(&Seoul))
+                    .num_seconds()
+                    .max(0) as u64;
+                tracing::info!(
+                    "Market closed for today — next session starts {} | waiting {}s",
+                    open_tomorrow.format("%Y-%m-%d 09:00 KST"),
+                    wait_secs
+                );
+                sleep(Duration::from_secs(wait_secs)).await;
+            }
+        }
 
         // ── Wait until 09:00 KST ────────────────────────────────────────────
         self.wait_until(9, 0).await;
@@ -65,7 +87,6 @@ impl SessionScheduler {
         tracing::info!("Opening range locked — monitoring for breakouts");
 
         // ── Wait until exit_time → switch to Closed ─────────────────────────
-        let (exit_h, exit_m) = parse_time(&self.config.trading.exit_time);
         self.wait_until(exit_h, exit_m).await;
         self.engine.lock().await.set_phase(SessionPhase::Closed);
         tracing::info!("Exit time reached — forcing close of all open positions");
