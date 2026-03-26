@@ -150,4 +150,20 @@ mod tests {
         let client = MockMarketDataClient::new(std::collections::HashMap::new());
         assert!(client.fetch_price("unknown").await.is_err());
     }
+
+    /// Live API smoke test — requires KIS_APP_KEY / KIS_APP_SECRET / KIS_ACCOUNT_NO in env.
+    /// Run with: cargo test live_price -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn test_live_price_fetch() {
+        let _ = dotenvy::dotenv();
+        let creds = crate::config::Credentials::from_env();
+        let client = KisMarketDataClient::new(creds).await.expect("token fetch failed");
+
+        for symbol in &["005930", "069500"] {
+            let price = client.fetch_price(symbol).await.expect("price fetch failed");
+            println!("{symbol}: ₩{price}");
+            assert!(price > 0);
+        }
+    }
 }
