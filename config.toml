@@ -1,0 +1,14 @@
+[trading]
+mode = "paper"
+fixed_amount_krw = 500000
+breakout_buffer_pct = 0.2
+range_minutes = 30
+poll_interval_secs = 5
+exit_time = "15:20"
+
+[risk]
+stop_loss_pct = 1.5
+daily_loss_limit_krw = 100000
+
+[symbols]
+watchlist = ["005930", "069500"]
