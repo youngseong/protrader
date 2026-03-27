@@ -1,5 +1,6 @@
+use std::sync::Arc;
 use async_trait::async_trait;
-use crate::config::Credentials;
+use crate::auth::KisAuthProvider;
 
 #[derive(Debug, Clone)]
 pub enum OrderSide {
@@ -36,52 +37,22 @@ impl OrderClient for PaperOrderClient {
 
 pub struct LiveOrderClient {
     http: reqwest::Client,
-    base_url: String,
-    credentials: Credentials,
-    token: tokio::sync::RwLock<String>,
+    auth: Arc<KisAuthProvider>,
 }
 
 impl LiveOrderClient {
-    pub async fn new(credentials: Credentials) -> anyhow::Result<Self> {
-        let http = reqwest::Client::new();
-        let base_url = "https://openapi.koreainvestment.com:9443".to_string();
-        let token = Self::fetch_token(&http, &base_url, &credentials).await?;
-        Ok(Self {
-            http,
-            base_url,
-            credentials,
-            token: tokio::sync::RwLock::new(token),
-        })
-    }
-
-    async fn fetch_token(
-        http: &reqwest::Client,
-        base_url: &str,
-        creds: &Credentials,
-    ) -> anyhow::Result<String> {
-        #[derive(serde::Deserialize)]
-        struct TokenResponse {
-            access_token: String,
+    pub fn new(auth: Arc<KisAuthProvider>) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            auth,
         }
-        let resp: TokenResponse = http
-            .post(format!("{}/oauth2/tokenP", base_url))
-            .json(&serde_json::json!({
-                "grant_type": "client_credentials",
-                "appkey": creds.app_key,
-                "appsecret": creds.app_secret,
-            }))
-            .send()
-            .await?
-            .json()
-            .await?;
-        Ok(resp.access_token)
     }
 }
 
 #[async_trait]
 impl OrderClient for LiveOrderClient {
     async fn place_order(&self, req: &OrderRequest) -> anyhow::Result<()> {
-        let token = self.token.read().await;
+        let token = self.auth.token().await;
         let tr_id = match req.side {
             OrderSide::Buy => "TTTC0802U",
             OrderSide::Sell => "TTTC0801U",
@@ -90,15 +61,15 @@ impl OrderClient for LiveOrderClient {
             .http
             .post(format!(
                 "{}/uapi/domestic-stock/v1/trading/order-cash",
-                self.base_url
+                self.auth.base_url()
             ))
             .header("content-type", "application/json; charset=utf-8")
-            .header("authorization", format!("Bearer {}", *token))
-            .header("appkey", &self.credentials.app_key)
-            .header("appsecret", &self.credentials.app_secret)
+            .header("authorization", format!("Bearer {}", token))
+            .header("appkey", self.auth.app_key())
+            .header("appsecret", self.auth.app_secret())
             .header("tr_id", tr_id)
             .json(&serde_json::json!({
-                "CANO": self.credentials.account_no,
+                "CANO": self.auth.account_no(),
                 "ACNT_PRDT_CD": "01",
                 "PDNO": req.symbol,
                 "ORD_DVSN": "00",

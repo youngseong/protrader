@@ -1,104 +1,87 @@
+use crate::auth::KisAuthProvider;
 use async_trait::async_trait;
-use crate::config::Credentials;
+use chrono::{DateTime, Utc};
+use std::sync::Arc;
+
+#[derive(Debug, Clone)]
+pub struct Quote {
+    pub price: i64,
+    pub timestamp: DateTime<Utc>,
+    pub volume: Option<u64>,
+}
 
 #[async_trait]
 pub trait MarketDataClient: Send + Sync {
-    async fn fetch_price(&self, symbol: &str) -> anyhow::Result<i64>;
+    async fn fetch_price(&self, symbol: &str) -> anyhow::Result<Quote>;
 }
 
 // ── KIS HTTP implementation ───────────────────────────────────────────────────
 
 pub struct KisMarketDataClient {
     http: reqwest::Client,
-    base_url: String,
-    credentials: Credentials,
-    token: tokio::sync::RwLock<String>,
+    auth: Arc<KisAuthProvider>,
 }
 
 impl KisMarketDataClient {
-    pub async fn new(credentials: Credentials) -> anyhow::Result<Self> {
-        let http = reqwest::Client::new();
-        let base_url = "https://openapi.koreainvestment.com:9443".to_string();
-        let token = Self::fetch_token(&http, &base_url, &credentials).await?;
-        Ok(Self {
-            http,
-            base_url,
-            credentials,
-            token: tokio::sync::RwLock::new(token),
-        })
-    }
-
-    async fn fetch_token(
-        http: &reqwest::Client,
-        base_url: &str,
-        creds: &Credentials,
-    ) -> anyhow::Result<String> {
-        #[derive(serde::Deserialize)]
-        struct TokenResponse {
-            access_token: String,
+    pub fn new(auth: Arc<KisAuthProvider>) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            auth,
         }
-        let resp: TokenResponse = http
-            .post(format!("{}/oauth2/tokenP", base_url))
-            .json(&serde_json::json!({
-                "grant_type": "client_credentials",
-                "appkey": creds.app_key,
-                "appsecret": creds.app_secret,
-            }))
-            .send()
-            .await?
-            .json()
-            .await?;
-        Ok(resp.access_token)
     }
 }
 
 #[async_trait]
 impl MarketDataClient for KisMarketDataClient {
-    async fn fetch_price(&self, symbol: &str) -> anyhow::Result<i64> {
+    async fn fetch_price(&self, symbol: &str) -> anyhow::Result<Quote> {
         #[derive(serde::Deserialize)]
         struct PriceOutput {
-            stck_prpr: String, // current price as a string in KIS API
+            stck_prpr: String,
+            acml_vol: Option<String>,
         }
         #[derive(serde::Deserialize)]
         struct PriceResponse {
             output: PriceOutput,
         }
 
-        let token = self.token.read().await;
+        let token = self.auth.token().await;
         let resp: PriceResponse = self
             .http
             .get(format!(
                 "{}/uapi/domestic-stock/v1/quotations/inquire-price",
-                self.base_url
+                self.auth.base_url()
             ))
             .header("content-type", "application/json; charset=utf-8")
-            .header("authorization", format!("Bearer {}", *token))
-            .header("appkey", &self.credentials.app_key)
-            .header("appsecret", &self.credentials.app_secret)
+            .header("authorization", format!("Bearer {}", token))
+            .header("appkey", self.auth.app_key())
+            .header("appsecret", self.auth.app_secret())
             .header("tr_id", "FHKST01010100")
-            .query(&[
-                ("FID_COND_MRKT_DIV_CODE", "J"),
-                ("FID_INPUT_ISCD", symbol),
-            ])
+            .query(&[("FID_COND_MRKT_DIV_CODE", "J"), ("FID_INPUT_ISCD", symbol)])
             .send()
             .await?
             .json()
             .await?;
 
         let price: i64 = resp.output.stck_prpr.trim().parse()?;
-        Ok(price)
+        let volume = resp
+            .output
+            .acml_vol
+            .as_deref()
+            .and_then(|v| v.trim().parse::<u64>().ok());
+        Ok(Quote {
+            price,
+            timestamp: Utc::now(),
+            volume,
+        })
     }
 }
 
 // ── Mock for testing ──────────────────────────────────────────────────────────
 
-/// Returns prices from a pre-loaded sequence per symbol.
+/// Returns quotes from a pre-loaded price sequence per symbol.
 /// Repeats the last price once the sequence is exhausted.
 pub struct MockMarketDataClient {
-    prices: std::collections::HashMap<
-        String,
-        std::sync::Mutex<std::collections::VecDeque<i64>>,
-    >,
+    prices: std::collections::HashMap<String, std::sync::Mutex<std::collections::VecDeque<i64>>>,
 }
 
 impl MockMarketDataClient {
@@ -114,18 +97,23 @@ impl MockMarketDataClient {
 
 #[async_trait]
 impl MarketDataClient for MockMarketDataClient {
-    async fn fetch_price(&self, symbol: &str) -> anyhow::Result<i64> {
+    async fn fetch_price(&self, symbol: &str) -> anyhow::Result<Quote> {
         let mut deque = self
             .prices
             .get(symbol)
             .ok_or_else(|| anyhow::anyhow!("unknown symbol: {}", symbol))?
             .lock()
             .unwrap();
-        if deque.len() > 1 {
-            Ok(deque.pop_front().unwrap())
+        let price = if deque.len() > 1 {
+            deque.pop_front().unwrap()
         } else {
-            Ok(*deque.front().unwrap())
-        }
+            *deque.front().unwrap()
+        };
+        Ok(Quote {
+            price,
+            timestamp: Utc::now(),
+            volume: None,
+        })
     }
 }
 
@@ -136,13 +124,15 @@ mod tests {
     #[tokio::test]
     async fn test_mock_returns_sequence_then_repeats_last() {
         let mut prices = std::collections::HashMap::new();
-        prices.insert("005930".to_string(), vec![71_000, 72_000, 73_000]);
+        let ticker = "005930";
+
+        prices.insert(ticker.to_string(), vec![71_000, 72_000, 73_000]);
         let client = MockMarketDataClient::new(prices);
 
-        assert_eq!(client.fetch_price("005930").await.unwrap(), 71_000);
-        assert_eq!(client.fetch_price("005930").await.unwrap(), 72_000);
-        assert_eq!(client.fetch_price("005930").await.unwrap(), 73_000);
-        assert_eq!(client.fetch_price("005930").await.unwrap(), 73_000); // repeated
+        assert_eq!(client.fetch_price(ticker).await.unwrap().price, 71_000);
+        assert_eq!(client.fetch_price(ticker).await.unwrap().price, 72_000);
+        assert_eq!(client.fetch_price(ticker).await.unwrap().price, 73_000);
+        assert_eq!(client.fetch_price(ticker).await.unwrap().price, 73_000); // repeated
     }
 
     #[tokio::test]
@@ -157,13 +147,21 @@ mod tests {
     #[ignore]
     async fn test_live_price_fetch() {
         let _ = dotenvy::dotenv();
-        let creds = crate::config::Credentials::from_env();
-        let client = KisMarketDataClient::new(creds).await.expect("token fetch failed");
+        let creds = crate::config::KisCredentials::from_env();
+        let http = reqwest::Client::new();
+        let base_url = "https://openapi.koreainvestment.com:9443".to_string();
+        let auth = crate::auth::KisAuthProvider::new(http, base_url, creds)
+            .await
+            .expect("token fetch failed");
+        let client = KisMarketDataClient::new(auth);
 
         for symbol in &["005930", "069500"] {
-            let price = client.fetch_price(symbol).await.expect("price fetch failed");
-            println!("{symbol}: ₩{price}");
-            assert!(price > 0);
+            let quote = client
+                .fetch_price(symbol)
+                .await
+                .expect("price fetch failed");
+            println!("{symbol}: ₩{}", quote.price);
+            assert!(quote.price > 0);
         }
     }
 }

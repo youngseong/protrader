@@ -1,4 +1,21 @@
+use chrono::NaiveTime;
 use serde::Deserialize;
+
+fn deserialize_naive_time<'de, D>(de: D) -> Result<NaiveTime, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(de)?;
+    NaiveTime::parse_from_str(&s, "%H:%M").map_err(serde::de::Error::custom)
+}
+
+fn deserialize_tz<'de, D>(de: D) -> Result<chrono_tz::Tz, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(de)?;
+    s.parse::<chrono_tz::Tz>().map_err(serde::de::Error::custom)
+}
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -10,29 +27,56 @@ pub enum TradingMode {
 #[derive(Debug, Deserialize, Clone)]
 pub struct TradingConfig {
     pub mode: TradingMode,
-    pub fixed_amount_krw: i64,
+    pub fixed_amount: i64,
     pub breakout_buffer_pct: f64,
     pub range_minutes: u32,
     pub poll_interval_secs: u64,
-    pub exit_time: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct RiskConfig {
     pub stop_loss_pct: f64,
-    pub daily_loss_limit_krw: i64,
+    pub daily_loss_limit: i64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct SymbolsConfig {
-    pub watchlist: Vec<String>,
+pub struct MarketConfig {
+    #[serde(deserialize_with = "deserialize_tz")]
+    pub timezone: chrono_tz::Tz,
+    #[serde(deserialize_with = "deserialize_naive_time")]
+    pub open_time: NaiveTime,
+    #[serde(deserialize_with = "deserialize_naive_time")]
+    pub exit_time: NaiveTime,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct SymbolConfig {
+    pub ticker: String,
+    pub fixed_amount: Option<i64>,
+    pub breakout_buffer_pct: Option<f64>,
+    pub stop_loss_pct: Option<f64>,
+}
+
+impl SymbolConfig {
+    pub fn effective_fixed_amount(&self, trading: &TradingConfig) -> i64 {
+        self.fixed_amount.unwrap_or(trading.fixed_amount)
+    }
+
+    pub fn effective_breakout_buffer_pct(&self, trading: &TradingConfig) -> f64 {
+        self.breakout_buffer_pct.unwrap_or(trading.breakout_buffer_pct)
+    }
+
+    pub fn effective_stop_loss_pct(&self, risk: &RiskConfig) -> f64 {
+        self.stop_loss_pct.unwrap_or(risk.stop_loss_pct)
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub trading: TradingConfig,
     pub risk: RiskConfig,
-    pub symbols: SymbolsConfig,
+    pub market: MarketConfig,
+    pub symbols: Vec<SymbolConfig>,
 }
 
 impl Config {
@@ -44,37 +88,31 @@ impl Config {
     }
 
     fn validate(&self) -> anyhow::Result<()> {
-        // Validate exit_time format
-        let parts: Vec<&str> = self.trading.exit_time.splitn(2, ':').collect();
-        if parts.len() != 2 {
-            anyhow::bail!("invalid exit_time '{}': must be HH:MM format", self.trading.exit_time);
+        if self.symbols.is_empty() {
+            anyhow::bail!("symbols list must not be empty");
         }
-        let h: u32 = parts[0].parse().map_err(|_| anyhow::anyhow!("invalid exit_time hour '{}'", parts[0]))?;
-        let m: u32 = parts[1].parse().map_err(|_| anyhow::anyhow!("invalid exit_time minute '{}'", parts[1]))?;
-        if h > 23 || m > 59 {
-            anyhow::bail!("invalid exit_time '{}': hour must be 0-23, minute 0-59", self.trading.exit_time);
+        if self.trading.fixed_amount <= 0 {
+            anyhow::bail!("fixed_amount must be positive");
         }
-        // Validate watchlist is non-empty
-        if self.symbols.watchlist.is_empty() {
-            anyhow::bail!("watchlist must not be empty");
-        }
-        // Validate positive amounts
-        if self.trading.fixed_amount_krw <= 0 {
-            anyhow::bail!("fixed_amount_krw must be positive");
+        if self.market.exit_time <= self.market.open_time {
+            anyhow::bail!("exit_time must be after open_time");
         }
         Ok(())
+    }
+
+    pub fn tickers(&self) -> Vec<String> {
+        self.symbols.iter().map(|s| s.ticker.clone()).collect()
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct Credentials {
+pub struct KisCredentials {
     pub app_key: String,
     pub app_secret: String,
     pub account_no: String,
 }
 
-impl Credentials {
-    /// Load from environment variables. Panics with a clear message if any are missing.
+impl KisCredentials {
     pub fn from_env() -> Self {
         let app_key = std::env::var("KIS_APP_KEY")
             .expect("KIS_APP_KEY not set — copy .env.example to .env and fill in your credentials");
@@ -96,24 +134,26 @@ mod tests {
         let config = Config::load(manifest.join("config.toml").to_str().unwrap())
             .expect("should load config.toml");
         assert_eq!(config.trading.mode, TradingMode::Paper);
-        assert_eq!(config.trading.fixed_amount_krw, 500_000);
+        assert_eq!(config.trading.fixed_amount, 500_000);
         assert!((config.trading.breakout_buffer_pct - 0.2).abs() < f64::EPSILON);
         assert_eq!(config.trading.range_minutes, 30);
         assert_eq!(config.trading.poll_interval_secs, 5);
-        assert_eq!(config.trading.exit_time, "15:20");
+        assert_eq!(config.market.timezone, chrono_tz::Asia::Seoul);
+        assert_eq!(config.market.open_time, NaiveTime::from_hms_opt(9, 0, 0).unwrap());
+        assert_eq!(config.market.exit_time, NaiveTime::from_hms_opt(15, 20, 0).unwrap());
         assert!((config.risk.stop_loss_pct - 5.0).abs() < f64::EPSILON);
-        assert_eq!(config.risk.daily_loss_limit_krw, 100_000);
-        assert_eq!(config.symbols.watchlist, vec!["005930", "069500"]);
+        assert_eq!(config.risk.daily_loss_limit, 100_000);
+        assert_eq!(config.tickers(), vec!["005930", "069500"]);
     }
 
     #[test]
-    fn test_credentials_from_env() {
+    fn test_kis_credentials_from_env() {
         unsafe {
             std::env::set_var("KIS_APP_KEY", "test_key");
             std::env::set_var("KIS_APP_SECRET", "test_secret");
             std::env::set_var("KIS_ACCOUNT_NO", "12345678");
         }
-        let creds = Credentials::from_env();
+        let creds = KisCredentials::from_env();
         assert_eq!(creds.app_key, "test_key");
         assert_eq!(creds.app_secret, "test_secret");
         assert_eq!(creds.account_no, "12345678");
