@@ -8,12 +8,14 @@ use crate::config::{Config, TradingMode};
 use crate::strategy::{StrategyEngine, SessionPhase, Signal, ExitReason};
 use crate::order::{OrderClient, OrderRequest, OrderSide};
 use crate::market_data::MarketDataClient;
+use crate::telegram::TelegramNotifier;
 
 pub struct SessionScheduler {
     config: Arc<Config>,
     engine: Arc<Mutex<StrategyEngine>>,
     market_data: Arc<dyn MarketDataClient>,
     order_client: Arc<dyn OrderClient>,
+    notifier: Option<Arc<TelegramNotifier>>,
 }
 
 impl SessionScheduler {
@@ -22,8 +24,9 @@ impl SessionScheduler {
         engine: Arc<Mutex<StrategyEngine>>,
         market_data: Arc<dyn MarketDataClient>,
         order_client: Arc<dyn OrderClient>,
+        notifier: Option<Arc<TelegramNotifier>>,
     ) -> Self {
-        Self { config, engine, market_data, order_client }
+        Self { config, engine, market_data, order_client, notifier }
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
@@ -75,11 +78,12 @@ impl SessionScheduler {
                 let engine = self.engine.clone();
                 let market_data = self.market_data.clone();
                 let order_client = self.order_client.clone();
+                let notifier = self.notifier.clone();
                 let poll = Duration::from_secs(self.config.trading.poll_interval_secs);
                 let mode = mode_str.to_string();
                 let shutdown = shutdown.clone();
                 tokio::spawn(async move {
-                    symbol_loop(symbol, engine, market_data, order_client, poll, mode, tz, shutdown).await;
+                    symbol_loop(symbol, engine, market_data, order_client, notifier, poll, mode, tz, shutdown).await;
                 })
             })
             .collect();
@@ -135,6 +139,7 @@ async fn symbol_loop(
     engine: Arc<Mutex<StrategyEngine>>,
     market_data: Arc<dyn MarketDataClient>,
     order_client: Arc<dyn OrderClient>,
+    notifier: Option<Arc<TelegramNotifier>>,
     poll: Duration,
     mode_str: String,
     tz: chrono_tz::Tz,
@@ -185,6 +190,12 @@ async fn symbol_loop(
                 match order_client.place_order(&req).await {
                     Ok(_) => {
                         engine.lock().await.record_buy(&symbol, price, qty);
+                        if let Some(n) = &notifier {
+                            n.send(&format!(
+                                "[{}] BUY {}\nprice={} | qty={} | amount={}",
+                                mode_str, symbol, price, qty, amount
+                            )).await;
+                        }
                     }
                     Err(e) => {
                         tracing::error!(
@@ -224,6 +235,12 @@ async fn symbol_loop(
                                 "{} | [{}] | SESSION PnL | realized={} | unrealized={} | total={}",
                                 now_local(tz), mode_str, session.realized, session.unrealized, session.total()
                             );
+                            if let Some(n) = &notifier {
+                                n.send(&format!(
+                                    "[{}] {} {}\nprice={} | realized_pnl={}{}\nsession_pnl={}",
+                                    mode_str, reason_str, symbol, price, pnl, blacklist_suffix, session.total()
+                                )).await;
+                            }
                         }
                         Err(e) => {
                             tracing::error!(

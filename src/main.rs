@@ -7,6 +7,7 @@ use protrader::market_data::KisMarketDataClient;
 use protrader::order::{LiveOrderClient, PaperOrderClient};
 use protrader::scheduler::SessionScheduler;
 use protrader::strategy::{OrbStrategy, StrategyEngine};
+use protrader::telegram::TelegramNotifier;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -32,18 +33,23 @@ async fn main() -> anyhow::Result<()> {
         config.risk.daily_loss_limit,
     )));
 
+    let notifier = TelegramNotifier::from_env().map(Arc::new);
+    if notifier.is_some() {
+        tracing::info!("Telegram notifications enabled");
+    }
+
     match config.trading.mode {
         TradingMode::Paper => {
             tracing::info!("Running in PAPER mode — no real orders will be placed");
             let order_client = Arc::new(PaperOrderClient);
-            SessionScheduler::new(config, engine, market_data, order_client)
+            SessionScheduler::new(config, engine, market_data, order_client, notifier)
                 .run()
                 .await?;
         }
         TradingMode::Live => {
             tracing::info!("Running in LIVE mode — real orders WILL be placed");
             let order_client = Arc::new(LiveOrderClient::new(auth));
-            SessionScheduler::new(config, engine, market_data, order_client)
+            SessionScheduler::new(config, engine, market_data, order_client, notifier)
                 .run()
                 .await?;
         }
