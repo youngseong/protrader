@@ -1,5 +1,7 @@
 pub mod auth;
+pub mod backtest;
 pub mod config;
+pub mod historical;
 pub mod logging;
 pub mod market_data;
 pub mod order;
