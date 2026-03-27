@@ -12,7 +12,7 @@ daily_loss_limit = 100000
 [market]
 timezone = "Asia/Seoul"
 open_time = "09:00"
-exit_time = "15:20"
+exit_time = "16:00"
 
 [[symbols]]
 ticker = "005930"
