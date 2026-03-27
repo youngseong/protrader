@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
     match config.trading.mode {
         TradingMode::Paper => {
             tracing::info!("Running in PAPER mode — no real orders will be placed");
-            let order_client = Arc::new(PaperOrderClient);
+            let order_client = Arc::new(PaperOrderClient::new(10_000_000));
             SessionScheduler::new(config, engine, market_data, order_client, notifier)
                 .run()
                 .await?;
