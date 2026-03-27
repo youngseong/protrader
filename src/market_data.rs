@@ -1,7 +1,7 @@
-use std::sync::Arc;
+use crate::auth::KisAuthProvider;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use crate::auth::KisAuthProvider;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct Quote {
@@ -56,20 +56,23 @@ impl MarketDataClient for KisMarketDataClient {
             .header("appkey", self.auth.app_key())
             .header("appsecret", self.auth.app_secret())
             .header("tr_id", "FHKST01010100")
-            .query(&[
-                ("FID_COND_MRKT_DIV_CODE", "J"),
-                ("FID_INPUT_ISCD", symbol),
-            ])
+            .query(&[("FID_COND_MRKT_DIV_CODE", "J"), ("FID_INPUT_ISCD", symbol)])
             .send()
             .await?
             .json()
             .await?;
 
         let price: i64 = resp.output.stck_prpr.trim().parse()?;
-        let volume = resp.output.acml_vol
+        let volume = resp
+            .output
+            .acml_vol
             .as_deref()
             .and_then(|v| v.trim().parse::<u64>().ok());
-        Ok(Quote { price, timestamp: Utc::now(), volume })
+        Ok(Quote {
+            price,
+            timestamp: Utc::now(),
+            volume,
+        })
     }
 }
 
@@ -78,10 +81,7 @@ impl MarketDataClient for KisMarketDataClient {
 /// Returns quotes from a pre-loaded price sequence per symbol.
 /// Repeats the last price once the sequence is exhausted.
 pub struct MockMarketDataClient {
-    prices: std::collections::HashMap<
-        String,
-        std::sync::Mutex<std::collections::VecDeque<i64>>,
-    >,
+    prices: std::collections::HashMap<String, std::sync::Mutex<std::collections::VecDeque<i64>>>,
 }
 
 impl MockMarketDataClient {
@@ -109,7 +109,11 @@ impl MarketDataClient for MockMarketDataClient {
         } else {
             *deque.front().unwrap()
         };
-        Ok(Quote { price, timestamp: Utc::now(), volume: None })
+        Ok(Quote {
+            price,
+            timestamp: Utc::now(),
+            volume: None,
+        })
     }
 }
 
@@ -120,13 +124,15 @@ mod tests {
     #[tokio::test]
     async fn test_mock_returns_sequence_then_repeats_last() {
         let mut prices = std::collections::HashMap::new();
-        prices.insert("005930".to_string(), vec![71_000, 72_000, 73_000]);
+        let ticker = "005930";
+
+        prices.insert(ticker.to_string(), vec![71_000, 72_000, 73_000]);
         let client = MockMarketDataClient::new(prices);
 
-        assert_eq!(client.fetch_price("005930").await.unwrap().price, 71_000);
-        assert_eq!(client.fetch_price("005930").await.unwrap().price, 72_000);
-        assert_eq!(client.fetch_price("005930").await.unwrap().price, 73_000);
-        assert_eq!(client.fetch_price("005930").await.unwrap().price, 73_000); // repeated
+        assert_eq!(client.fetch_price(ticker).await.unwrap().price, 71_000);
+        assert_eq!(client.fetch_price(ticker).await.unwrap().price, 72_000);
+        assert_eq!(client.fetch_price(ticker).await.unwrap().price, 73_000);
+        assert_eq!(client.fetch_price(ticker).await.unwrap().price, 73_000); // repeated
     }
 
     #[tokio::test]
@@ -150,7 +156,10 @@ mod tests {
         let client = KisMarketDataClient::new(auth);
 
         for symbol in &["005930", "069500"] {
-            let quote = client.fetch_price(symbol).await.expect("price fetch failed");
+            let quote = client
+                .fetch_price(symbol)
+                .await
+                .expect("price fetch failed");
             println!("{symbol}: ₩{}", quote.price);
             assert!(quote.price > 0);
         }
