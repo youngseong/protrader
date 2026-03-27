@@ -1,11 +1,12 @@
 /// Backtest runner binary.
 ///
 /// Usage:
-///   cargo run --bin backtest -- <YYYY-MM-DD>
+///   cargo run --bin backtest -- <YYYY-MM-DD>                   # single day
+///   cargo run --bin backtest -- <YYYY-MM-DD> <YYYY-MM-DD>     # date range
 ///
-/// Fetches minute-bar data from KIS for the given date (cached under data/),
-/// then runs all registered strategy variants in parallel over the same tick
-/// stream and prints a comparison table.
+/// Fetches minute-bar data from KIS for each trading day in the range (cached
+/// under data/YYYYMMDD/<symbol>.csv), then runs all strategy variants over the
+/// same tick stream and prints a comparison table.
 use std::sync::Arc;
 use chrono::NaiveDate;
 
@@ -19,12 +20,19 @@ use protrader::strategy::OrbStrategy;
 async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
 
-    let date_str = std::env::args().nth(1).unwrap_or_else(|| {
-        eprintln!("Usage: backtest <YYYY-MM-DD>");
+    let mut args = std::env::args().skip(1);
+    let start_str = args.next().unwrap_or_else(|| {
+        eprintln!("Usage: backtest <YYYY-MM-DD> [<YYYY-MM-DD>]");
         std::process::exit(1);
     });
-    let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
-        .map_err(|e| anyhow::anyhow!("invalid date '{}': {}", date_str, e))?;
+    let start = NaiveDate::parse_from_str(&start_str, "%Y-%m-%d")
+        .map_err(|e| anyhow::anyhow!("invalid start date '{}': {}", start_str, e))?;
+    let end = match args.next() {
+        Some(s) => NaiveDate::parse_from_str(&s, "%Y-%m-%d")
+            .map_err(|e| anyhow::anyhow!("invalid end date '{}': {}", s, e))?,
+        None => start,
+    };
+    anyhow::ensure!(end >= start, "end date must be >= start date");
 
     let config = Arc::new(Config::load("config.toml")?);
 
@@ -41,16 +49,22 @@ async fn main() -> anyhow::Result<()> {
     let hist = KisHistoricalClient::new(auth);
     let mut ticks = Vec::new();
     for sc in &config.symbols {
-        println!("Fetching {} for {}...", sc.ticker, date);
-        let mut t = hist.fetch_day(&sc.ticker, date).await?;
-        println!("  {} ticks (cached at data/{}/{}.csv)", t.len(), date.format("%Y%m%d"), sc.ticker);
-        ticks.append(&mut t);
+        if start == end {
+            println!("Fetching {} for {}...", sc.ticker, start);
+            let mut t = hist.fetch_day(&sc.ticker, start).await?;
+            println!("  {} ticks", t.len());
+            ticks.append(&mut t);
+        } else {
+            println!("Fetching {} for {} → {}...", sc.ticker, start, end);
+            let mut t = hist.fetch_range(&sc.ticker, start, end).await?;
+            println!("  {} ticks across date range", t.len());
+            ticks.append(&mut t);
+        }
     }
-    // Interleave all symbols in time order for the runner
     ticks.sort_by_key(|t| t.time);
 
     if ticks.is_empty() {
-        anyhow::bail!("no data returned — is {} a valid KST trading day?", date);
+        anyhow::bail!("no data returned — check that the date range contains valid KST trading days");
     }
 
     // ── Build strategy variants ───────────────────────────────────────────────
@@ -84,8 +98,19 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Run and print results ─────────────────────────────────────────────────
 
-    println!("\nRunning {} strategies over {} ticks...\n", runner.run_count(), ticks.len());
-    let results = runner.run(&ticks).await;
+    println!(
+        "\nRunning {} strategies over {} ticks ({} → {})...\n",
+        runner.run_count(),
+        ticks.len(),
+        start,
+        end,
+    );
+
+    let results = if start == end {
+        runner.run(&ticks).await
+    } else {
+        runner.run_days(&ticks).await
+    };
 
     println!(
         "{:<25} {:>14} {:>14} {:>8}",

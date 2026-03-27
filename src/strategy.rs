@@ -61,6 +61,8 @@ pub trait Strategy: Send {
     fn record_exit(&mut self, symbol: &str, price: i64, blacklist: bool) -> i64;
     fn get_position_qty(&self, symbol: &str) -> u32;
     fn session_pnl(&self) -> SessionPnl;
+    /// Reset all per-session state so the strategy is ready for a new trading day.
+    fn reset(&mut self);
 }
 
 // ── OrbStrategy internal per-symbol state ────────────────────────────────────
@@ -219,6 +221,17 @@ impl Strategy for OrbStrategy {
     fn session_pnl(&self) -> SessionPnl {
         self.session_pnl.clone()
     }
+
+    fn reset(&mut self) {
+        for state in self.symbols.values_mut() {
+            state.range_high = 0;
+            state.range_low = i64::MAX;
+            state.position = None;
+            state.blacklisted = false;
+            state.cached_unrealized = 0;
+        }
+        self.session_pnl = SessionPnl::default();
+    }
 }
 
 // ── StrategyEngine (coordinator) ──────────────────────────────────────────────
@@ -242,6 +255,13 @@ impl StrategyEngine {
 
     pub fn set_phase(&mut self, phase: SessionPhase) {
         self.phase = phase;
+    }
+
+    /// Reset all per-session state for a new trading day.
+    pub fn reset(&mut self) {
+        self.strategy.reset();
+        self.phase = SessionPhase::CapturingRange;
+        self.daily_limit_hit = false;
     }
 
     pub fn on_tick(&mut self, symbol: &str, price: i64) -> Signal {

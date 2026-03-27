@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 use crate::auth::KisAuthProvider;
 
 /// A single price observation replayed during backtesting.
@@ -131,6 +131,33 @@ impl KisHistoricalClient {
             });
         }
         Ok(ticks)
+    }
+
+    /// Fetch minute-bar ticks for `symbol` over an inclusive date range (KST).
+    ///
+    /// Weekends are skipped automatically. Trading holidays return an empty
+    /// batch and are silently omitted from the result.
+    /// Returns all ticks sorted ascending by time.
+    pub async fn fetch_range(
+        &self,
+        symbol: &str,
+        start: NaiveDate,
+        end: NaiveDate,
+    ) -> anyhow::Result<Vec<Tick>> {
+        let mut all = Vec::new();
+        let mut date = start;
+        while date <= end {
+            let wd = date.weekday();
+            if wd != Weekday::Sat && wd != Weekday::Sun {
+                match self.fetch_day(symbol, date).await {
+                    Ok(ticks) if !ticks.is_empty() => all.extend(ticks),
+                    Ok(_) => tracing::debug!("{} {} — no data (holiday?)", symbol, date),
+                    Err(e) => tracing::warn!("skipping {} {}: {}", symbol, date, e),
+                }
+            }
+            date = date.succ_opt().expect("date overflow");
+        }
+        Ok(all)
     }
 }
 
