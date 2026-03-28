@@ -84,7 +84,7 @@ impl KisAuthProvider {
         struct TokenResponse {
             access_token: String,
         }
-        let resp: TokenResponse = http
+        let raw = http
             .post(format!("{}/oauth2/tokenP", base_url))
             .json(&serde_json::json!({
                 "grant_type": "client_credentials",
@@ -93,8 +93,17 @@ impl KisAuthProvider {
             }))
             .send()
             .await?
-            .json()
+            .error_for_status()
+            .map_err(|e| anyhow::anyhow!("KIS token request failed (HTTP {})", e.status().map_or_else(|| "?".to_string(), |s| s.to_string())))?
+            .bytes()
             .await?;
+        let resp: TokenResponse = serde_json::from_slice(&raw).map_err(|e| {
+            anyhow::anyhow!(
+                "KIS token response parse error: {} — body: {}",
+                e,
+                String::from_utf8_lossy(&raw)
+            )
+        })?;
         Ok(resp.access_token)
     }
 }
