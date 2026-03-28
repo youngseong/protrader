@@ -11,6 +11,7 @@ pub struct Tick {
     pub price: i64,
 }
 
+#[derive(Clone)]
 pub struct KisHistoricalClient {
     http: reqwest::Client,
     auth: Arc<KisAuthProvider>,
@@ -138,25 +139,45 @@ impl KisHistoricalClient {
     /// Weekends are skipped automatically. Trading holidays return an empty
     /// batch and are silently omitted from the result.
     /// Returns all ticks sorted ascending by time.
+    ///
+    /// Days are fetched concurrently; results are merged in calendar order.
     pub async fn fetch_range(
         &self,
         symbol: &str,
         start: NaiveDate,
         end: NaiveDate,
     ) -> anyhow::Result<Vec<Tick>> {
-        let mut all = Vec::new();
+        // Collect weekday dates up front so we can fan out concurrently.
+        let mut dates = Vec::new();
         let mut date = start;
         while date <= end {
             let wd = date.weekday();
             if wd != Weekday::Sat && wd != Weekday::Sun {
-                match self.fetch_day(symbol, date).await {
-                    Ok(ticks) if !ticks.is_empty() => all.extend(ticks),
-                    Ok(_) => tracing::debug!("{} {} — no data (holiday?)", symbol, date),
-                    Err(e) => tracing::warn!("skipping {} {}: {}", symbol, date, e),
-                }
+                dates.push(date);
             }
             date = date.succ_opt().expect("date overflow");
         }
+
+        let mut set = tokio::task::JoinSet::new();
+        for d in dates {
+            let client = self.clone();
+            let sym = symbol.to_string();
+            set.spawn(async move { (d, client.fetch_day(&sym, d).await) });
+        }
+
+        // Collect results keyed by date, then sort to restore calendar order.
+        let mut day_ticks: Vec<(NaiveDate, Vec<Tick>)> = Vec::new();
+        while let Some(res) = set.join_next().await {
+            let (d, outcome) = res.expect("task panicked");
+            match outcome {
+                Ok(ticks) if !ticks.is_empty() => day_ticks.push((d, ticks)),
+                Ok(_) => tracing::debug!("{} {} — no data (holiday?)", symbol, d),
+                Err(e) => tracing::warn!("skipping {} {}: {}", symbol, d, e),
+            }
+        }
+        day_ticks.sort_by_key(|(d, _)| *d);
+
+        let all = day_ticks.into_iter().flat_map(|(_, t)| t).collect();
         Ok(all)
     }
 }
