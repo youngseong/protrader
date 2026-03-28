@@ -224,6 +224,7 @@ async fn symbol_loop(
                                 ExitReason::StopLoss => "STOP-LOSS",
                                 ExitReason::DailyLimitReached => "DAILY-LIMIT",
                                 ExitReason::ForcedClose => "FORCED-CLOSE",
+                                ExitReason::SignalExit => "SIGNAL-EXIT",
                             };
                             let blacklist_suffix = if blacklist { " | blacklisted" } else { "" };
                             tracing::info!(

@@ -14,7 +14,7 @@ use protrader::auth::KisAuthProvider;
 use protrader::backtest::BacktestRunner;
 use protrader::config::{Config, KisCredentials};
 use protrader::historical::KisHistoricalClient;
-use protrader::strategy::OrbStrategy;
+use protrader::strategy::{EmaCrossStrategy, OrbStrategy, VwapReversionStrategy};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -93,6 +93,56 @@ async fn main() -> anyhow::Result<()> {
     runner.add_run(
         "ORB-wide-stoploss",
         Box::new(OrbStrategy::new(&config.trading, &r3, &config.symbols)),
+        10_000_000,
+    );
+
+    // Variant 4: EMA crossover — fast=5, slow=20 (intraday momentum)
+    runner.add_run(
+        "EMA-cross-5-20",
+        Box::new(EmaCrossStrategy::new(
+            &config.trading,
+            &config.risk,
+            &config.symbols,
+            5,
+            20,
+        )),
+        10_000_000,
+    );
+
+    // Variant 5: EMA crossover — faster periods for more responsive signals
+    runner.add_run(
+        "EMA-cross-3-10",
+        Box::new(EmaCrossStrategy::new(
+            &config.trading,
+            &config.risk,
+            &config.symbols,
+            3,
+            10,
+        )),
+        10_000_000,
+    );
+
+    // Variant 6: VWAP mean reversion — buy 1% below running VWAP, exit on reversion
+    runner.add_run(
+        "VWAP-reversion-1pct",
+        Box::new(VwapReversionStrategy::new(
+            &config.trading,
+            &config.risk,
+            &config.symbols,
+            1.0,
+        )),
+        10_000_000,
+    );
+
+    // Variant 7: VWAP mean reversion — tighter entry (0.5%) catches shallower dips
+    runner.add_run(
+        "VWAP-reversion-0.5pct",
+        Box::new(VwapReversionStrategy::new(
+            &config.trading,
+            &config.risk,
+            &config.symbols,
+            0.5,
+        )),
         10_000_000,
     );
 
