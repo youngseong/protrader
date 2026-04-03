@@ -44,7 +44,7 @@ This is an async Rust trading bot targeting the Korean stock market (KOSPI) via 
 ```
 09:00 → CapturingRange phase: builds indicators (range high/low, EMAs, VWAP)
 09:30 → Monitoring phase: watches for entries and exits
-16:00 → Closed phase: forces exit of all open positions
+15:20 → Closed phase: forces exit of all open positions
 ```
 
 `SessionScheduler` (`src/scheduler.rs`) drives the lifecycle using `wait_until()` to sleep until KST wall-clock times. It spawns one `symbol_loop` task per symbol (Tokio), each polling price at `poll_interval_secs` and delegating signals to `StrategyEngine`.

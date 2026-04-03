@@ -17,7 +17,7 @@ All strategies share a common `Strategy` trait and respect the same session life
 ```
 09:00 → CapturingRange  — builds indicators (ORB range, EMAs, VWAP)
 09:30 → Monitoring      — watches for entries and exits
-16:00 → Closed          — forces exit of all open positions
+15:20 → Closed          — forces exit of all open positions
 ```
 
 If the bot starts after 09:30 it automatically fetches historical minute bars for the opening range window and replays them so all strategies have warm-up history before monitoring begins.
@@ -117,7 +117,7 @@ level = "info"           # "error" | "warn" | "info" | "debug" | "trace"
 [market]
 timezone = "Asia/Seoul"
 open_time = "09:00"
-exit_time = "16:00"      # forced close time
+exit_time = "15:20"      # forced close time
 
 [[symbols]]
 ticker = "005930"        # Samsung Electronics
