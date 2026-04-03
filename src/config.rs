@@ -63,7 +63,8 @@ impl SymbolConfig {
     }
 
     pub fn effective_breakout_buffer_pct(&self, trading: &TradingConfig) -> f64 {
-        self.breakout_buffer_pct.unwrap_or(trading.breakout_buffer_pct)
+        self.breakout_buffer_pct
+            .unwrap_or(trading.breakout_buffer_pct)
     }
 
     pub fn effective_stop_loss_pct(&self, risk: &RiskConfig) -> f64 {
@@ -72,10 +73,46 @@ impl SymbolConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StrategyConfig {
+    Orb,
+    EmaCross { fast_period: u32, slow_period: u32 },
+    VwapReversion { entry_deviation_pct: f64 },
+}
+
+impl Default for StrategyConfig {
+    fn default() -> Self {
+        StrategyConfig::Orb
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct LoggingConfig {
+    #[serde(default = "default_log_level")]
+    pub level: String,
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub trading: TradingConfig,
     pub risk: RiskConfig,
     pub market: MarketConfig,
+    #[serde(default)]
+    pub strategy: StrategyConfig,
+    #[serde(default)]
+    pub logging: LoggingConfig,
     pub symbols: Vec<SymbolConfig>,
 }
 
@@ -116,11 +153,17 @@ impl KisCredentials {
     pub fn from_env() -> Self {
         let app_key = std::env::var("KIS_APP_KEY")
             .expect("KIS_APP_KEY not set — copy .env.example to .env and fill in your credentials");
-        let app_secret = std::env::var("KIS_APP_SECRET")
-            .expect("KIS_APP_SECRET not set — copy .env.example to .env and fill in your credentials");
-        let account_no = std::env::var("KIS_ACCOUNT_NO")
-            .expect("KIS_ACCOUNT_NO not set — copy .env.example to .env and fill in your credentials");
-        Self { app_key, app_secret, account_no }
+        let app_secret = std::env::var("KIS_APP_SECRET").expect(
+            "KIS_APP_SECRET not set — copy .env.example to .env and fill in your credentials",
+        );
+        let account_no = std::env::var("KIS_ACCOUNT_NO").expect(
+            "KIS_ACCOUNT_NO not set — copy .env.example to .env and fill in your credentials",
+        );
+        Self {
+            app_key,
+            app_secret,
+            account_no,
+        }
     }
 }
 
@@ -139,11 +182,18 @@ mod tests {
         assert_eq!(config.trading.range_minutes, 30);
         assert_eq!(config.trading.poll_interval_secs, 5);
         assert_eq!(config.market.timezone, chrono_tz::Asia::Seoul);
-        assert_eq!(config.market.open_time, NaiveTime::from_hms_opt(9, 0, 0).unwrap());
-        assert_eq!(config.market.exit_time, NaiveTime::from_hms_opt(15, 20, 0).unwrap());
+        assert_eq!(
+            config.market.open_time,
+            NaiveTime::from_hms_opt(9, 0, 0).unwrap()
+        );
+        assert_eq!(
+            config.market.exit_time,
+            NaiveTime::from_hms_opt(15, 20, 0).unwrap()
+        );
         assert!((config.risk.stop_loss_pct - 5.0).abs() < f64::EPSILON);
         assert_eq!(config.risk.daily_loss_limit, 100_000);
-        assert_eq!(config.tickers(), vec!["005930", "069500"]);
+        assert!(matches!(config.strategy, StrategyConfig::Orb));
+        assert_eq!(config.tickers(), vec!["005930"]);
     }
 
     #[test]

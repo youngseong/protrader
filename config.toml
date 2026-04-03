@@ -9,13 +9,34 @@ poll_interval_secs = 5
 stop_loss_pct = 5
 daily_loss_limit = 100000
 
+[strategy]
+type = "vwap_reversion"
+entry_deviation_pct = 1.0
+
+[logging]
+level = "info"
+
 [market]
 timezone = "Asia/Seoul"
 open_time = "09:00"
-exit_time = "16:00"
+exit_time = "15:20"
+
+# Semiconductors
+[[symbols]]
+ticker = "005930" # Samsung Electronics
 
 [[symbols]]
-ticker = "005930"
+ticker = "000660" # SK Hynix
+
+# Defense
+[[symbols]]
+ticker = "012450" # Hanwha Aerospace
 
 [[symbols]]
-ticker = "069500"
+ticker = "047810" # Korea Aerospace Industries (KAI)
+
+[[symbols]]
+ticker = "079550" # LIG Nex1
+
+[[symbols]]
+ticker = "064350" # Hyundai Rotem

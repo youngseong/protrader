@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 
-use protrader::config::{Config, TradingConfig, RiskConfig, MarketConfig, SymbolConfig, TradingMode};
+use protrader::config::{Config, TradingConfig, RiskConfig, MarketConfig, StrategyConfig, SymbolConfig, TradingMode};
 use protrader::strategy::{OrbStrategy, StrategyEngine, SessionPhase, Signal, ExitReason};
 use protrader::market_data::{MockMarketDataClient, MarketDataClient};
 
@@ -33,6 +33,7 @@ fn paper_config(tickers: Vec<&str>) -> Config {
             open_time: chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
             exit_time: chrono::NaiveTime::from_hms_opt(15, 20, 0).unwrap(),
         },
+        strategy: StrategyConfig::Orb,
         symbols: tickers.into_iter().map(sym).collect(),
     }
 }

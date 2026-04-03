@@ -10,7 +10,7 @@ impl TelegramNotifier {
         let token = std::env::var("TELEGRAM_BOT_TOKEN").ok()?;
         let chat_id = std::env::var("TELEGRAM_CHAT_ID").ok()?;
         Some(Self {
-            http: reqwest::Client::new(),
+            http: crate::http_client(),
             token,
             chat_id,
         })

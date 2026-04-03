@@ -1,3 +1,5 @@
-/target
+/data/
+/logs/
+/target/
+
 .env
-logs/

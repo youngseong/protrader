@@ -9,6 +9,7 @@ use crate::strategy::{StrategyEngine, SessionPhase, Signal, ExitReason};
 use crate::order::{OrderClient, OrderRequest, OrderSide};
 use crate::market_data::MarketDataClient;
 use crate::telegram::TelegramNotifier;
+use crate::historical::KisHistoricalClient;
 
 pub struct SessionScheduler {
     config: Arc<Config>,
@@ -16,6 +17,7 @@ pub struct SessionScheduler {
     market_data: Arc<dyn MarketDataClient>,
     order_client: Arc<dyn OrderClient>,
     notifier: Option<Arc<TelegramNotifier>>,
+    historical: Option<Arc<KisHistoricalClient>>,
 }
 
 impl SessionScheduler {
@@ -25,8 +27,9 @@ impl SessionScheduler {
         market_data: Arc<dyn MarketDataClient>,
         order_client: Arc<dyn OrderClient>,
         notifier: Option<Arc<TelegramNotifier>>,
+        historical: Option<Arc<KisHistoricalClient>>,
     ) -> Self {
-        Self { config, engine, market_data, order_client, notifier }
+        Self { config, engine, market_data, order_client, notifier, historical }
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
@@ -65,6 +68,14 @@ impl SessionScheduler {
             "Session started — capturing opening range until {}",
             range_end.format("%H:%M")
         );
+
+        // ── Mid-session start: reconstruct opening range from historical bars ──
+        {
+            let now = chrono::Utc::now().with_timezone(&tz);
+            if now.time() >= range_end {
+                self.reconstruct_opening_range(now.date_naive(), open_time, range_end).await;
+            }
+        }
 
         let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -117,6 +128,63 @@ impl SessionScheduler {
         Ok(())
     }
 
+    /// Fetch today's historical bars for each symbol and replay those that fall
+    /// within [open_time, range_end) through the engine in CapturingRange phase.
+    /// Called on mid-session startup so all strategies have warm-up history.
+    async fn reconstruct_opening_range(
+        &self,
+        today: chrono::NaiveDate,
+        open_time: NaiveTime,
+        range_end: NaiveTime,
+    ) {
+        let Some(hist) = &self.historical else {
+            tracing::warn!("Mid-session start but no historical client — ORB range not captured");
+            return;
+        };
+
+        tracing::info!(
+            "Mid-session start — reconstructing opening range ({} to {}) from historical bars",
+            open_time.format("%H:%M"),
+            range_end.format("%H:%M"),
+        );
+
+        for sc in &self.config.symbols {
+            match hist.fetch_day(&sc.ticker, today).await {
+                Ok(ticks) => {
+                    let range_ticks: Vec<_> = ticks
+                        .iter()
+                        .filter(|t| {
+                            let t = t.time.time();
+                            t >= open_time && t < range_end
+                        })
+                        .collect();
+                    if range_ticks.is_empty() {
+                        tracing::warn!(
+                            "symbol={} — no historical ticks in opening range window",
+                            sc.ticker
+                        );
+                    } else {
+                        let mut engine = self.engine.lock().await;
+                        for tick in &range_ticks {
+                            engine.on_tick(&sc.ticker, tick.price);
+                        }
+                        tracing::info!(
+                            "symbol={} — replayed {} ticks for range reconstruction",
+                            sc.ticker,
+                            range_ticks.len(),
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "symbol={} — historical fetch failed, ORB range unavailable: {}",
+                        sc.ticker, e
+                    );
+                }
+            }
+        }
+    }
+
     /// Sleep until a given wall-clock time in the configured timezone.
     /// Returns immediately if already past.
     async fn wait_until(&self, target: NaiveTime) {
@@ -162,7 +230,7 @@ async fn symbol_loop(
             Err(e) => {
                 retry_count += 1;
                 tracing::warn!(
-                    "symbol={} price fetch error (attempt {}): {}",
+                    "symbol={} price fetch error (attempt {}): {:#}",
                     symbol, retry_count, e
                 );
                 if retry_count >= 3 {
@@ -224,6 +292,7 @@ async fn symbol_loop(
                                 ExitReason::StopLoss => "STOP-LOSS",
                                 ExitReason::DailyLimitReached => "DAILY-LIMIT",
                                 ExitReason::ForcedClose => "FORCED-CLOSE",
+                                ExitReason::SignalExit => "SIGNAL-EXIT",
                             };
                             let blacklist_suffix = if blacklist { " | blacklisted" } else { "" };
                             tracing::info!(
