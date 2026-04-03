@@ -73,56 +73,7 @@ impl SessionScheduler {
         {
             let now = chrono::Utc::now().with_timezone(&tz);
             if now.time() >= range_end {
-                match &self.historical {
-                    Some(hist) => {
-                        let today = now.date_naive();
-                        tracing::info!(
-                            "Mid-session start — reconstructing opening range ({} to {}) from historical bars",
-                            open_time.format("%H:%M"),
-                            range_end.format("%H:%M"),
-                        );
-                        for sc in &self.config.symbols {
-                            match hist.fetch_day(&sc.ticker, today).await {
-                                Ok(ticks) => {
-                                    let range_ticks: Vec<_> = ticks
-                                        .iter()
-                                        .filter(|t| {
-                                            let t = t.time.time();
-                                            t >= open_time && t < range_end
-                                        })
-                                        .collect();
-                                    if range_ticks.is_empty() {
-                                        tracing::warn!(
-                                            "symbol={} — no historical ticks in opening range window",
-                                            sc.ticker
-                                        );
-                                    } else {
-                                        let mut engine = self.engine.lock().await;
-                                        for tick in &range_ticks {
-                                            engine.on_tick(&sc.ticker, tick.price);
-                                        }
-                                        tracing::info!(
-                                            "symbol={} — replayed {} ticks for range reconstruction",
-                                            sc.ticker,
-                                            range_ticks.len(),
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "symbol={} — historical fetch failed, ORB range unavailable: {}",
-                                        sc.ticker, e
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    None => {
-                        tracing::warn!(
-                            "Mid-session start but no historical client — ORB range not captured"
-                        );
-                    }
-                }
+                self.reconstruct_opening_range(now.date_naive(), open_time, range_end).await;
             }
         }
 
@@ -175,6 +126,63 @@ impl SessionScheduler {
         );
 
         Ok(())
+    }
+
+    /// Fetch today's historical bars for each symbol and replay those that fall
+    /// within [open_time, range_end) through the engine in CapturingRange phase.
+    /// Called on mid-session startup so all strategies have warm-up history.
+    async fn reconstruct_opening_range(
+        &self,
+        today: chrono::NaiveDate,
+        open_time: NaiveTime,
+        range_end: NaiveTime,
+    ) {
+        let Some(hist) = &self.historical else {
+            tracing::warn!("Mid-session start but no historical client — ORB range not captured");
+            return;
+        };
+
+        tracing::info!(
+            "Mid-session start — reconstructing opening range ({} to {}) from historical bars",
+            open_time.format("%H:%M"),
+            range_end.format("%H:%M"),
+        );
+
+        for sc in &self.config.symbols {
+            match hist.fetch_day(&sc.ticker, today).await {
+                Ok(ticks) => {
+                    let range_ticks: Vec<_> = ticks
+                        .iter()
+                        .filter(|t| {
+                            let t = t.time.time();
+                            t >= open_time && t < range_end
+                        })
+                        .collect();
+                    if range_ticks.is_empty() {
+                        tracing::warn!(
+                            "symbol={} — no historical ticks in opening range window",
+                            sc.ticker
+                        );
+                    } else {
+                        let mut engine = self.engine.lock().await;
+                        for tick in &range_ticks {
+                            engine.on_tick(&sc.ticker, tick.price);
+                        }
+                        tracing::info!(
+                            "symbol={} — replayed {} ticks for range reconstruction",
+                            sc.ticker,
+                            range_ticks.len(),
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "symbol={} — historical fetch failed, ORB range unavailable: {}",
+                        sc.ticker, e
+                    );
+                }
+            }
+        }
     }
 
     /// Sleep until a given wall-clock time in the configured timezone.
