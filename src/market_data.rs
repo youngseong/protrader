@@ -25,7 +25,7 @@ pub struct KisMarketDataClient {
 impl KisMarketDataClient {
     pub fn new(auth: Arc<KisAuthProvider>) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: crate::http_client(),
             auth,
         }
     }
@@ -148,7 +148,7 @@ mod tests {
     async fn test_live_price_fetch() {
         let _ = dotenvy::dotenv();
         let creds = crate::config::KisCredentials::from_env();
-        let http = reqwest::Client::new();
+        let http = crate::http_client();
         let base_url = "https://openapi.koreainvestment.com:9443".to_string();
         let auth = crate::auth::KisAuthProvider::new(http, base_url, creds)
             .await

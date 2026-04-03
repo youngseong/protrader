@@ -18,7 +18,7 @@ async fn main() -> anyhow::Result<()> {
     let config = Arc::new(Config::load("config.toml")?);
     let credentials = KisCredentials::from_env();
     let auth = KisAuthProvider::new(
-        reqwest::Client::new(),
+        protrader::http_client(),
         "https://openapi.koreainvestment.com:9443".to_string(),
         credentials,
     )

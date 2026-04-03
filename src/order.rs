@@ -112,7 +112,7 @@ pub struct LiveOrderClient {
 impl LiveOrderClient {
     pub fn new(auth: Arc<KisAuthProvider>) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: crate::http_client(),
             auth,
         }
     }

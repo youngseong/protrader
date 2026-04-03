@@ -19,7 +19,7 @@ pub struct KisHistoricalClient {
 
 impl KisHistoricalClient {
     pub fn new(auth: Arc<KisAuthProvider>) -> Self {
-        Self { http: reqwest::Client::new(), auth }
+        Self { http: crate::http_client(), auth }
     }
 
     /// Fetch all minute-bar ticks for `symbol` on `date` (KST), sorted ascending by time.
@@ -238,7 +238,7 @@ mod tests {
         let _ = dotenvy::dotenv();
         let creds = crate::config::KisCredentials::from_env();
         let auth = crate::auth::KisAuthProvider::new(
-            reqwest::Client::new(),
+            crate::http_client(),
             "https://openapi.koreainvestment.com:9443".to_string(),
             creds,
         )
