@@ -20,6 +20,8 @@ All strategies share a common `Strategy` trait and respect the same session life
 16:00 → Closed          — forces exit of all open positions
 ```
 
+If the bot starts after 09:30 it automatically fetches historical minute bars for the opening range window and replays them so all strategies have warm-up history before monitoring begins.
+
 ## Setup
 
 **Prerequisites:** Rust toolchain, a KIS Open API account.
@@ -101,6 +103,17 @@ poll_interval_secs = 5   # price polling frequency
 stop_loss_pct = 5        # stop-loss trigger (% below entry price)
 daily_loss_limit = 100000  # max realized loss before halting new entries (KRW)
 
+[strategy]
+type = "orb"             # "orb" | "ema_cross" | "vwap_reversion"
+# EMA cross options:
+# fast_period = 5
+# slow_period = 20
+# VWAP reversion options:
+# entry_deviation_pct = 1.0
+
+[logging]
+level = "info"           # "error" | "warn" | "info" | "debug" | "trace"
+
 [market]
 timezone = "Asia/Seoul"
 open_time = "09:00"
@@ -110,7 +123,7 @@ exit_time = "16:00"      # forced close time
 ticker = "005930"        # Samsung Electronics
 
 [[symbols]]
-ticker = "069500"        # KODEX 200 ETF
+ticker = "000660"        # SK Hynix
 ```
 
 Per-symbol overrides for `fixed_amount`, `breakout_buffer_pct`, and `stop_loss_pct` are supported:
@@ -137,8 +150,7 @@ In `paper` mode no real orders are placed. `PaperOrderClient` maintains a simula
 cargo check                          # type-check without building
 cargo test                           # unit + integration tests
 cargo test test_buy_signal_on_breakout  # run a single test
-cargo test --lib strategy::tests     # tests for a specific module
-cargo test --test integration_test   # integration tests only
+cargo test --lib strategies::tests   # tests for a specific module
 cargo test live_price -- --ignored --nocapture  # live KIS API smoke test (requires .env)
 cargo clippy                         # lint
 ```
@@ -147,16 +159,17 @@ cargo clippy                         # lint
 
 | Module | Responsibility |
 |---|---|
-| `src/strategy.rs` | Pure synchronous signal logic; no I/O. Defines the `Strategy` trait and `OrbStrategy`, `EmaCrossStrategy`, `VwapReversionStrategy`. `StrategyEngine` wraps any strategy and enforces daily loss limits and phase transitions. |
-| `src/scheduler.rs` | Async orchestration. Drives session phases, spawns per-symbol Tokio tasks, places orders. |
+| `src/strategies/` | Pure synchronous signal logic; no I/O. Defines the `Strategy` trait and `OrbStrategy`, `EmaCrossStrategy`, `VwapReversionStrategy`. `StrategyEngine` wraps any strategy and enforces daily loss limits and phase transitions. |
+| `src/scheduler.rs` | Async orchestration. Drives session phases, spawns per-symbol Tokio tasks, places orders. Reconstructs opening range from historical bars on mid-session startup. |
 | `src/backtest.rs` | `BacktestRunner` replays historical ticks through multiple engines simultaneously. Supports single-day and multi-day modes with per-day resets. |
 | `src/historical.rs` | Fetches and caches minute-bar ticks from the KIS API. |
 | `src/market_data.rs` | `MarketDataClient` trait — `KisMarketDataClient` (live HTTP) and `MockMarketDataClient` (test replay). |
 | `src/order.rs` | `OrderClient` trait — `PaperOrderClient` (simulated account) and `LiveOrderClient` (KIS HTTP). |
 | `src/auth.rs` | KIS OAuth token management. |
 | `src/config.rs` | `config.toml` deserialization and validation. |
-| `src/logging.rs` | Dual stdout + daily-rotating file logging. |
+| `src/logging.rs` | Dual stdout + daily-rotating file logging with configurable level. |
 | `src/telegram.rs` | Optional Telegram notifications on buy/sell. |
+| `src/lib.rs` | `http_client()` — shared reqwest client with `pool_idle_timeout=25s` and `tcp_keepalive=15s`. |
 
 **Key design decisions:**
 - Prices are `i64` (Korean Won, integer) — no floating point for money.
