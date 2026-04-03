@@ -13,6 +13,9 @@ daily_loss_limit = 100000
 type = "vwap_reversion"
 entry_deviation_pct = 1.0
 
+[logging]
+level = "info"
+
 [market]
 timezone = "Asia/Seoul"
 open_time = "09:00"

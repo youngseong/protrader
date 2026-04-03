@@ -91,12 +91,30 @@ impl Default for StrategyConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+pub struct LoggingConfig {
+    #[serde(default = "default_log_level")]
+    pub level: String,
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self { level: default_log_level() }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub trading: TradingConfig,
     pub risk: RiskConfig,
     pub market: MarketConfig,
     #[serde(default)]
     pub strategy: StrategyConfig,
+    #[serde(default)]
+    pub logging: LoggingConfig,
     pub symbols: Vec<SymbolConfig>,
 }
 

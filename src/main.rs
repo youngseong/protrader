@@ -14,10 +14,10 @@ use protrader::telegram::TelegramNotifier;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
-    let _guard = protrader::logging::init();
 
     let config = Arc::new(Config::load("config.toml")?);
-    tracing::info!("Config loaded — mode={:?}", config.trading.mode);
+    let _guard = protrader::logging::init(&config.logging.level);
+    tracing::info!("Config loaded — mode={:?}, log_level={}", config.trading.mode, config.logging.level);
 
     let credentials = KisCredentials::from_env();
     let auth = KisAuthProvider::new(
