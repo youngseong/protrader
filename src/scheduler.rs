@@ -222,7 +222,7 @@ async fn symbol_loop(
             Err(e) => {
                 retry_count += 1;
                 tracing::warn!(
-                    "symbol={} price fetch error (attempt {}): {}",
+                    "symbol={} price fetch error (attempt {}): {:#}",
                     symbol, retry_count, e
                 );
                 if retry_count >= 3 {

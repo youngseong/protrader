@@ -21,5 +21,22 @@ timezone = "Asia/Seoul"
 open_time = "09:00"
 exit_time = "16:00"
 
+# Semiconductors
 [[symbols]]
-ticker = "005930"
+ticker = "005930"  # Samsung Electronics
+
+[[symbols]]
+ticker = "000660"  # SK Hynix
+
+# Defense
+[[symbols]]
+ticker = "012450"  # Hanwha Aerospace
+
+[[symbols]]
+ticker = "047810"  # Korea Aerospace Industries (KAI)
+
+[[symbols]]
+ticker = "079550"  # LIG Nex1
+
+[[symbols]]
+ticker = "064350"  # Hyundai Rotem
