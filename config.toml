@@ -9,6 +9,10 @@ poll_interval_secs = 5
 stop_loss_pct = 5
 daily_loss_limit = 100000
 
+[strategy]
+type = "vwap_reversion"
+entry_deviation_pct = 1.0
+
 [market]
 timezone = "Asia/Seoul"
 open_time = "09:00"

@@ -6,7 +6,8 @@ use protrader::config::{Config, KisCredentials, TradingMode};
 use protrader::market_data::KisMarketDataClient;
 use protrader::order::{LiveOrderClient, PaperOrderClient};
 use protrader::scheduler::SessionScheduler;
-use protrader::strategy::{OrbStrategy, StrategyEngine};
+use protrader::config::StrategyConfig;
+use protrader::strategies::{EmaCrossStrategy, OrbStrategy, StrategyEngine, VwapReversionStrategy};
 use protrader::telegram::TelegramNotifier;
 
 #[tokio::main]
@@ -27,11 +28,17 @@ async fn main() -> anyhow::Result<()> {
 
     let market_data = Arc::new(KisMarketDataClient::new(auth.clone()));
 
-    let orb = OrbStrategy::new(&config.trading, &config.risk, &config.symbols);
-    let engine = Arc::new(Mutex::new(StrategyEngine::new(
-        Box::new(orb),
-        config.risk.daily_loss_limit,
-    )));
+    let strategy: Box<dyn protrader::strategies::Strategy> = match &config.strategy {
+        StrategyConfig::Orb => Box::new(OrbStrategy::new(&config.trading, &config.risk, &config.symbols)),
+        StrategyConfig::EmaCross { fast_period, slow_period } => Box::new(EmaCrossStrategy::new(
+            &config.trading, &config.risk, &config.symbols, *fast_period, *slow_period,
+        )),
+        StrategyConfig::VwapReversion { entry_deviation_pct } => Box::new(VwapReversionStrategy::new(
+            &config.trading, &config.risk, &config.symbols, *entry_deviation_pct,
+        )),
+    };
+    tracing::info!("Strategy: {:?}", config.strategy);
+    let engine = Arc::new(Mutex::new(StrategyEngine::new(strategy, config.risk.daily_loss_limit)));
 
     let notifier = TelegramNotifier::from_env().map(Arc::new);
     if notifier.is_some() {
