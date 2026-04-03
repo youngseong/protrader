@@ -3,6 +3,7 @@ use tokio::sync::Mutex;
 
 use protrader::auth::KisAuthProvider;
 use protrader::config::{Config, KisCredentials, TradingMode};
+use protrader::historical::KisHistoricalClient;
 use protrader::market_data::KisMarketDataClient;
 use protrader::order::{LiveOrderClient, PaperOrderClient};
 use protrader::scheduler::SessionScheduler;
@@ -27,6 +28,7 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     let market_data = Arc::new(KisMarketDataClient::new(auth.clone()));
+    let historical = Arc::new(KisHistoricalClient::new(auth.clone()));
 
     let strategy: Box<dyn protrader::strategies::Strategy> = match &config.strategy {
         StrategyConfig::Orb => Box::new(OrbStrategy::new(&config.trading, &config.risk, &config.symbols)),
@@ -49,14 +51,14 @@ async fn main() -> anyhow::Result<()> {
         TradingMode::Paper => {
             tracing::info!("Running in PAPER mode — no real orders will be placed");
             let order_client = Arc::new(PaperOrderClient::new(10_000_000));
-            SessionScheduler::new(config, engine, market_data, order_client, notifier)
+            SessionScheduler::new(config, engine, market_data, order_client, notifier, Some(historical))
                 .run()
                 .await?;
         }
         TradingMode::Live => {
             tracing::info!("Running in LIVE mode — real orders WILL be placed");
             let order_client = Arc::new(LiveOrderClient::new(auth));
-            SessionScheduler::new(config, engine, market_data, order_client, notifier)
+            SessionScheduler::new(config, engine, market_data, order_client, notifier, Some(historical))
                 .run()
                 .await?;
         }
